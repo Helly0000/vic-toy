@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>蒸汽与账本 · 1836</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%230d1319'/%3E%3Crect x='3' y='3' width='26' height='26' rx='3' fill='none' stroke='%23d8b46a' stroke-width='2'/%3E%3Cpath d='M8 21 L13 11 L18 18 L24 8' fill='none' stroke='%23d8b46a' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div id="app">
+  <canvas id="map"></canvas>
+
+  <!-- ══════════ 顶栏 ══════════ -->
+  <header id="topbar">
+    <div class="tb-left">
+      <div id="country-flag" class="flag"></div>
+      <div class="country-block">
+        <div id="country-name" class="country-name">—</div>
+        <div id="country-sub" class="country-sub">—</div>
+      </div>
+    </div>
+
+    <div class="tb-center">
+      <div id="date" class="date">1836 年 1 月</div>
+      <div id="clock" class="clock">
+        <button class="spd" data-speed="0" title="暂停">❚❚</button>
+        <button class="spd" data-speed="1" title="慢">▶</button>
+        <button class="spd" data-speed="2" title="中">▶▶</button>
+        <button class="spd" data-speed="3" title="快">▶▶▶</button>
+        <button class="spd" data-speed="4" title="极快">▶▶▶▶</button>
+      </div>
+    </div>
+
+    <div class="tb-right">
+      <div class="stat"><label>国库</label><span id="stat-treasury">—</span></div>
+      <div class="stat"><label>本国人口</label><span id="stat-pop">—</span></div>
+
+      <div class="stat"><label>国力</label><span id="stat-gdp">—</span></div>
+      <div class="stat"><label>不安定</label><span id="stat-unrest">—</span></div>
+    </div>
+  </header>
+
+  <!-- ══════════ 左侧：省份 / 国家详情 ══════════ -->
+  <aside id="panel-left" class="panel">
+    <div class="panel-head">
+      <h2 id="sel-name">选择一个省份</h2>
+      <div id="sel-sub" class="sub">点击地图上的任意省份查看它的账本</div>
+    </div>
+    <div id="sel-body" class="panel-body">
+      <p class="hint">这片大陆上有 <b id="hint-provinces">—</b> 个省份、<b id="hint-countries">—</b> 个国家。<br>
+      拖动平移，滚轮缩放，点击省份查看详情。</p>
+    </div>
+    <!-- 建造 / 赈灾：玩家唯一的两个花钱口子 -->
+    <div id="action-body" class="panel-body action-body"></div>
+
+  </aside>
+
+  <!-- ══════════ 右侧：市场 + 排行 ══════════ -->
+  <aside id="panel-right" class="panel">
+    <div class="panel-head">
+      <h2>市场行情</h2>
+      <div class="sub" id="market-sub">本国五类商品的供需与价格</div>
+    </div>
+    <div id="market-body" class="panel-body"></div>
+
+    <div class="panel-head">
+      <h2>列国国力</h2>
+      <div class="sub">按国力排序 · 箭头为环比变化</div>
+    </div>
+    <div id="ranking-body" class="panel-body"></div>
+  </aside>
+
+  <!-- ══════════ 底栏：地图模式 + 大事记 ══════════ -->
+  <footer id="bottombar">
+    <div id="mapmodes">
+      <button class="mode active" data-mode="political">政治</button>
+      <button class="mode" data-mode="population">人口</button>
+      <button class="mode" data-mode="wealth">财富</button>
+      <button class="mode" data-mode="unrest">不安定</button>
+      <button class="mode" data-mode="industry">工业</button>
+      <button class="mode ghost" id="reset-view">复位视角</button>
+    </div>
+    <div id="ticker"><span class="ticker-label">大事记</span><span id="ticker-text">—</span></div>
+  </footer>
+
+  <!-- ══════════ 悬浮提示 ══════════ -->
+  <div id="tooltip" class="hidden"></div>
+
+  <!-- ══════════ 载入遮罩 ══════════ -->
+  <div id="loading">
+    <div class="loading-inner">
+      <div class="loading-title">蒸汽与账本</div>
+      <div class="loading-sub">正在勘定疆界、丈量田亩……</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 百年结算 ══════════ -->
+<div id="verdict" class="hidden">
+  <div class="verdict-card">
+    <div class="verdict-kicker">一局终了</div>
+    <h1 id="verdict-title">结算</h1>
+    <div id="verdict-body"></div>
+    <button id="verdict-again">再来一局</button>
+  </div>
+</div>
+
+
+<script src="js/rng.js"></script>
+<script src="js/mapgen.js"></script>
+<script src="js/sim.js"></script>
+<script src="js/render.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

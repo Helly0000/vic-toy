@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+._*
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# 本项目刻意保持零依赖零构建：如果以后出现了这些，说明选型跑偏了
+node_modules/
+dist/
+build/
+package-lock.json
+
+# 本地临时产物（测试台的截图 / 临时输出）
+*.tmp
+/tmp-*
