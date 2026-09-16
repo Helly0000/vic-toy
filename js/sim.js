@@ -170,6 +170,11 @@
       urban: new Float32Array(P),
       // 由禀赋折算出的生产加成，静态，算一次即可
       geoBonus: new Float32Array(G * P),
+      // 有限要素：省级产能天花板。levelCapUnit 是"单位人口的承载力"（静态），
+      // levelCap = levelCapUnit × 当前人口（每次结算刷新）。分工见 createWorld 里的说明。
+      levelCap: new Float32Array(G * P),
+      levelCapUnit: new Float32Array(G * P),
+
 
       // 国家层
       price: new Float32Array(G * C),
@@ -280,6 +285,31 @@
     }
     var avgPop0 = totalPop0 / P;
 
+    /* ═══════════ 有限要素：省级产能天花板（本次接入的核心） ═══════════
+     * 设计动机（见 冷战题材-涌现设计.md）：现状是「任何商品在任何地方都造得出来」，
+     * 唯一限制是钱和等级 —— 于是禀赋被大数定律摊平、贸易没有必需性、封锁没有牙齿。
+     *
+     * 与 geoBonus 的分工（两者都要，不重复）：
+     *   geoBonus  = 效率（同样的厂，产出多少）—— 决定谁更划算
+     *   levelCap  = 规模（这种厂最多能建几级）—— 决定谁能做大
+     * 前者是价格信号，后者是物理约束。已证实：只有量的约束会留疤。
+     *
+     * 标定方式（踩过一次坑）：**按各省自己的开局等级放大，而不是按 BASE_LEVEL 重算**。
+     * 第一版按 BASE_LEVEL 算，结果 80% 的格子开局就顶死、还出现负天花板 ——
+     * 因为各商品的实际开局等级普遍高于 BASE_LEVEL（人口 scale 与禀赋 bias 都在往上推）。
+     * 现在：天花板 = 开局等级 × (1 + 余量 × 适配度)，适配度 ∈ [-1, +1]，
+     * 于是"地理上不适合"的商品会被封在开局水平附近，"适合"的能长 2 倍以上。 */
+    var GOOD_TO_FACTOR = [w.fert, w.urban, w.timber, w.mineral, w.urban];
+    var IND_SENS = [0.15, 0.45, 0.20, 0.50, 0.40];   // 各商品对"工业/城市化"的依赖度
+    var CAP_GAIN = [1.35, 0.85, 1.30, 1.10, 0.90];  // 资源侧灵敏度
+    /* 余量参数：可通过 opts.capHeadroom 覆盖，用于标定扫描（见 test/cap-sweep.js）。
+     * 默认 3.0 —— 由扫描确定：太小则天花板成为增长天花板（人口 39M、不满 0.15），
+     * 太大则形同虚设。目标是让天花板约束**少数不合适的格子**，而不是掐住整体增长。 */
+    var CAP_HEADROOM = (opts.capHeadroom !== undefined) ? opts.capHeadroom : 5.5;
+
+    /* 不归一化：天花板是"每个省各自的地理约束"，不是一个要守恒的世界总量。
+     * 第一版做过归一化，那是把它当成了预算 —— 但它不是预算，是地貌。 */
+
     for (var p3 = 0; p3 < P; p3++) {
       var popHere = w.pop[0 * P + p3] + w.pop[1 * P + p3] + w.pop[2 * P + p3];
       var scale = clamp(popHere / avgPop0, 0.35, 2.8);
@@ -298,6 +328,49 @@
       w.unrest[p3] = clamp(0.30 - w.urban[p3] * 0.10 + rng() * 0.08, 0.02, 0.6);
     }
 
+    /* —— 有限要素的天花板：必须在开局等级填好之后才算 ——
+     * 踩过的坑：第一次把这段放在人口循环之前，那时 w.level 还全是 0，
+     * 于是所有天花板都被下限兜成 1.00，97% 的格子开局就顶死。 */
+    /* 适配度必须相对**各省均值**算，不能相对 1。
+     * 踩过的坑：fert/urban 的实际分布并不以 1 为中心（种子 8888 里
+     * 大半个地图的 fert 在 0.25~0.50，而均值是 1.09），
+     * 用 (fert - 1) 当偏离量，等于把绝大多数省判成"不适配"，
+     * 天花板全线低于开局等级 —— 那不是约束，那是噪声。
+     * 正确做法：先求该要素在全部省份上的均值，再看这个省偏离均值多少。 */
+    var factorMean = [];
+    for (var f4 = 0; f4 < G; f4++) {
+      var acc4 = 0;
+      for (var pm = 0; pm < P; pm++) acc4 += GOOD_TO_FACTOR[f4][pm];
+      factorMean.push(acc4 / P);
+    }
+
+    var popBase = new Float32Array(P);
+    for (var pb = 0; pb < P; pb++) {
+      popBase[pb] = w.pop[0 * P + pb] + w.pop[1 * P + pb] + w.pop[2 * P + pb];
+      if (popBase[pb] < 1) popBase[pb] = 1;
+    }
+
+    for (var p4 = 0; p4 < P; p4++) {
+      for (var g4 = 0; g4 < G; g4++) {
+        var idx4 = g4 * P + p4;
+        var startLv = w.level[idx4];
+        // 相对均值的偏离（-1 = 该要素只有世界平均的一半）
+        var resDev = factorMean[g4] > 0 ? (GOOD_TO_FACTOR[g4][p4] / factorMean[g4] - 1) : 0;
+        var indDev = factorMean[1] > 0 ? (w.urban[p4] / factorMean[1] - 1) : 0;
+        var fit = Math.min(resDev * CAP_GAIN[g4], indDev * IND_SENS[g4]);
+        fit = Math.max(-1, Math.min(1, fit));
+        /* 余量的给法（第二次踩坑）：中位省的 fit ≈ 0，如果写成
+         * cap = startLv × (1 + h × fit)，中位省的余量正好是 0 —— 它开局就顶死。
+         * 正确的形状是：fit = 0（世界平均水平）的省也要有基础余量，
+         * 高于平均的多长，低于平均的少长甚至封在开局水平。 */
+        var cap = startLv * (CAP_HEADROOM + fit);
+        // 下限：再不适配也要留一点位置，否则等于地理上完全禁止
+        if (cap < 1) cap = 1;
+        // 记的是"单位人口的承载力"，运行时再乘当前人口（见 refreshLevelCaps）
+        w.levelCapUnit[idx4] = cap / Math.max(1e-9, popBase[p4]);
+      }
+    }
+
     /* —— 初始价格 —— */
     for (var c = 0; c < C; c++) {
       for (var g = 0; g < G; g++) w.price[g * C + c] = GOODS[g].base;
@@ -309,6 +382,7 @@
      * 于是开局把 0 当成「灾情 100%」，每 tick 都在衰减一个并不存在的灾年，
      * 谷物价格直接飙到基准的 2.04 倍。零值在这里是个合法数值，必须显式写成 1。 */
     w.harvestShock.fill(1);
+    refreshLevelCaps(w);      // 开局先刷一次，之后每 tick 跟随人口
     for (var warm = 0; warm < 3; warm++) tick(w);
     w.warmed = true;   // 预热不再触发灾情：开局不该在第 0 个月就挨一次歉收
 
@@ -323,6 +397,23 @@
     pushEvent(w, '王国纪年 1836 年，欧洲列强的账本翻开了新的一页。', 'info');
 
     return w;
+  }
+
+  /* 有限要素：天花板随人口缩放。
+   * 为什么必须缩放：天花板是按开局人口标定的，而人口在 100 年里会涨 30% 以上。
+   * 如果钉死在开局那一刻，它就从"地理约束"退化成"增长天花板"——
+   * 实测 300 tick 时谷物想长到 13 级、却被钉在 4.76，那是在掐增长而不是在塑地理。
+   * 缩放后：省份人口翻倍，它的地理承载力也翻倍；而"适不适合产这个"的性格不变。 */
+  function refreshLevelCaps(w) {
+    var P = w.P, G = w.G;
+    for (var p = 0; p < P; p++) {
+      var pop = w.pop[0 * P + p] + w.pop[1 * P + p] + w.pop[2 * P + p];
+      for (var g = 0; g < G; g++) {
+        var cap = w.levelCapUnit[g * P + p] * pop;
+        if (cap < 1) cap = 1;
+        w.levelCap[g * P + p] = cap;
+      }
+    }
   }
 
   /* ---------------- 事件日志 ---------------- */
@@ -470,6 +561,9 @@
           var bestG = -1, bestScore = -1;
           for (g = 0; g < G2; g++) {
             if (w.level[g * P + p] >= MAX_LEVEL) continue;
+            // 有限要素：该省该商品已经顶到地理天花板，就不再投
+            if (w.level[g * P + p] + 1.5 > w.levelCap[g * P + p]) continue;
+
             var score = (w.price[g * C + c] / GOODS[g].base) *
                         Math.pow(w.geoBonus[g * P + p], 1.6) -
                         w.level[g * P + p] * 0.05;
@@ -517,7 +611,10 @@
       if (!w.building[p]) continue;
       if (--w.buildLeft[p] <= 0) {
         var bg = w.buildGood[p];
-        if (w.level[bg * P + p] < MAX_LEVEL) w.level[bg * P + p]++;
+        if (w.level[bg * P + p] < MAX_LEVEL && w.level[bg * P + p] + 1 <= w.levelCap[bg * P + p]) {
+          w.level[bg * P + p]++;
+        }
+
         w.building[p] = 0;
         w.constructionDone++;
       }
@@ -570,6 +667,9 @@
         if (w.harvestShock[c] > 0.995) w.harvestShock[c] = 1;
       }
     }
+
+    /* 8.7) 人口变了，地理承载力跟着变 —— 天花板是"地貌"，不是"开局快照" */
+    refreshLevelCaps(w);
 
     /* 9) 日历 */
     w.month++;
@@ -625,7 +725,10 @@
       if (kind === CMD_BUILD) {
         if (prov >= 0 && prov < w.P && good >= 0 && good < w.G && !w.building[prov]) {
           var lv = w.level[good * w.P + prov];
-          if (lv < MAX_LEVEL) {
+          /* 玩家建造同样受地理天花板约束 —— 否则玩家就成了绕过物理规律的后门，
+           * 而「玩家与 AI 守同一套规则」是这个架构的公平性地基。 */
+          if (lv < MAX_LEVEL && lv + 1 <= w.levelCap[good * w.P + prov]) {
+
             var cost = buildCost(lv);
             var ctry = w.map.provinces[prov].country;
             if (w.treasury[ctry] >= cost) {

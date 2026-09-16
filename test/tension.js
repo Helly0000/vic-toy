@@ -134,7 +134,11 @@ function stratSpecialize(w, c, tick) {
 }
 
 
-/* 在玩家国里找一个「没有在建、且还没满级」的省开工，一次只开一个 */
+/* 在玩家国里找一个「没有在建、且该商品还能长」的省开工，一次只开一个。
+ * 踩过的坑：第一版只判断 MAX_LEVEL，没判断有限要素的天花板。
+ * 于是策略会给一个已经顶到天花板的省下单 —— 命令被接受、钱被扣掉、完工时却长不了级。
+ * 这既污染了测试结果（玩家实力被低估），也是真实的手感问题，所以两边都要修：
+ * 这里过滤掉建不了的格子，applyCommands 那边也不该为建不成的工程收钱。 */
 function buildOnce(w, c, pickGood) {
   for (var p = 0; p < w.P; p++) {
     if (w.map.provinces[p].country !== c) continue;
@@ -142,7 +146,9 @@ function buildOnce(w, c, pickGood) {
     var g = pickGood(p);
     if (g < 0) continue;
     var lv = w.level[g * w.P + p];
-    if (w.treasury[c] < SIM.buildCost(lv)) continue;   // 钱不够，等下一轮
+    if (lv >= 14) continue;                       // 硬上限
+    if (lv + 1 > w.levelCap[g * w.P + p]) continue; // 地理天花板
+    if (w.treasury[c] < SIM.buildCost(lv)) continue; // 钱不够，等下一轮
     SIM.pushCommand(w, SIM.CMD_BUILD, p, g, 0);
     return true;
   }

@@ -488,11 +488,17 @@
 
     for (var i = 0; i < actionBtns.length; i++) {
       var a = actionBtns[i];
-      var lv = world.level[a.good * world.P + boundProvince];
+      var idx = a.good * world.P + boundProvince;
+      var lv = world.level[idx];
+      var cap = world.levelCap[idx];
       var cost = SIM.buildCost(lv);
-      a.lv.textContent = lv + ' / 14 级';
-      a.cost.textContent = fmtMoney(cost);
-      a.btn.disabled = busy || lv >= 14 || treasury < cost;
+      // 天花板顶住时显示"到顶"，而不是继续显示 14 —— 玩家要知道为什么点不动
+      var maxedByCap = lv + 1 > cap;
+      a.lv.textContent = maxedByCap
+        ? lv + ' 级 · 地理上限'
+        : lv + ' / ' + Math.min(14, Math.floor(cap)) + ' 级';
+      a.cost.textContent = maxedByCap ? '—' : fmtMoney(cost);
+      a.btn.disabled = busy || lv >= 14 || maxedByCap || treasury < cost;
     }
 
     if (busy) {
