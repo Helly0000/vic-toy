@@ -158,7 +158,7 @@ function buildOnce(w, c, pickGood) {
 /* 赈灾：国库充裕就开，紧张就关 —— 代表「玩家会算这笔账」 */
 function reliefPolicy(w, c) {
   var want = w.treasury[c] > w.provCount[c] * SIM.RELIEF_COST * 30 ? 1 : 0;
-  if ((w.reliefOn[c] ? 1 : 0) !== want) SIM.pushCommand(w, SIM.CMD_RELIEF, -1, 0, want);
+  if ((w.reliefOn[c] ? 1 : 0) !== want) SIM.pushCommand(w, SIM.CMD_RELIEF, -1, 0, want, c);
 }
 
 /* ───────────── 跑一种策略 ───────────── */
