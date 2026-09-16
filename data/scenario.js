@@ -478,6 +478,11 @@
 
     map.scenario = def.id;
     map.year = def.year || 1836;
+    /* 省份规模的钳位随剧本走。sim 的默认 [0.35, 2.8] 是照随机世界标定的
+     * （那里的省际人口差只有 2 倍），真实地球差 2000 倍，需要宽一点。
+     * 剧本不声明就用 sim 的默认值 —— 随机世界因此一位都不动。 */
+    if (def.scaleLo !== undefined) map.scaleLo = def.scaleLo;
+    if (def.scaleHi !== undefined) map.scaleHi = def.scaleHi;
 
     /* —— 5. 禀赋与人口：数据 → 四条通道 —— */
     attachEndowments(map, def, provs, tagToIdx, opts);

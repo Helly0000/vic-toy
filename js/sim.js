@@ -343,6 +343,12 @@
       priceCeil: (opts.priceCeil !== undefined) ? opts.priceCeil : PRICE_CEIL,
       tradeLambda: (opts.tradeLambda !== undefined) ? opts.tradeLambda : TRADE_LAMBDA,
       tradeD0: (opts.tradeD0 !== undefined) ? opts.tradeD0 : TRADE_D0,
+      /* 省份规模的钳位。剧本世界会放宽它（真实地球的人口分布宽得多），
+       * 随机世界用默认值 —— 于是这个改动对既有回归是零影响。 */
+      scaleLo: (opts.scaleLo !== undefined) ? opts.scaleLo
+        : (map.scaleLo !== undefined ? map.scaleLo : 0.35),
+      scaleHi: (opts.scaleHi !== undefined) ? opts.scaleHi
+        : (map.scaleHi !== undefined ? map.scaleHi : 2.8),
       worldPrice: new Float32Array(G),
       worldSupply: new Float32Array(G),
       worldDemand: new Float32Array(G),
@@ -506,7 +512,12 @@
 
     for (var p3 = 0; p3 < P; p3++) {
       var popHere = w.pop[0 * P + p3] + w.pop[1 * P + p3] + w.pop[2 * P + p3];
-      var scale = clamp(popHere / avgPop0, 0.35, 2.8);
+      /* 省份规模钳位。**它是一条世界参数，不是一个物理常数** ——
+       * 随机世界的省际人口差只有 2 倍（raw 0.56~2.1），钳位永远够用；
+       * 真实地球的省际人口差是 2000 倍（raw 0.15~7.0），同一副钳位会把
+       * 23% 的省压到下限、9% 压到上限，于是"华北平原能建多少厂"由钳位决定
+       * 而不是由它有多少人决定。默认值原样保留 ⇒ 随机世界逐字节不变。 */
+      var scale = clamp(popHere / avgPop0, w.scaleLo, w.scaleHi);
       var bias = [
         w.fert[p3] / meanFert,        // 谷物 ← 土地肥力
         w.urban[p3] / meanUrban,      // 布料 ← 城市化
