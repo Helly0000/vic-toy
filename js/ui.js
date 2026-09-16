@@ -97,6 +97,10 @@
     el.selBody.addEventListener('click', function (e) {
       var rb = e.target.closest('#btn-relief');
       if (rb && hooks.onRelief) hooks.onRelief();
+      /* 通商政策：三个档位。按钮不带状态，当前档位由 anote 里的文字说明 ——
+       * 这样重绘不用去同步按钮的 class，少一处会不同步的地方。 */
+      var ob = e.target.closest('[data-open]');
+      if (ob && hooks.onTrade) hooks.onTrade(parseFloat(ob.dataset.open));
     });
 
     buildMarketRows(world);
@@ -166,7 +170,13 @@
       var num = document.createElement('span');
       num.className = 'num';
 
-      top.appendChild(chip); top.appendChild(nm); top.appendChild(num);
+      /* 世界价：跨国市场接进来之后，最该被看见的一个数。
+       * 玩家看到「本国 1.12 / 世界 1.08」立刻知道自己在出口还是在进口。 */
+      var wld = document.createElement('small');
+      wld.className = 'wld';
+
+
+      top.appendChild(chip); top.appendChild(nm); top.appendChild(wld); top.appendChild(num);
 
       var bar = document.createElement('div');
       bar.className = 'bar';
@@ -177,7 +187,7 @@
 
       row.appendChild(top); row.appendChild(bar);
       el.marketBody.appendChild(row);
-      marketRows.push({ sub: sub, num: num, fill: fill, nm: nm });
+      marketRows.push({ sub: sub, num: num, wld: wld, fill: fill, nm: nm });
     }
   }
 
@@ -191,8 +201,18 @@
       var dev = r.rel - 1;
       var cls = dev > 0.18 ? 'bad' : (dev < -0.18 ? 'gold' : 'dim');
       dom.num.className = 'num ' + cls;
-      dom.sub.textContent = '供 ' + fmtInt(r.supply) + ' · 需 ' + fmtInt(r.demand) +
-        ' · ' + (r.balance >= 0 ? '盈余 ' : '缺口 ') + fmtInt(Math.abs(r.balance));
+      /* 世界价：本国价高于世界价 ⇒ 这个商品在本国是贵的（该进口）；
+       * 低于世界价 ⇒ 本国生产它有优势（该出口）。颜色直接表达这件事，不用玩家自己算。 */
+      dom.wld.textContent = '世 ' + r.worldPrice.toFixed(1);
+      var gap = r.worldPrice > 0 ? r.price / r.worldPrice : 1;
+      dom.wld.style.color = gap > 1.04 ? 'var(--bad)' : (gap < 0.96 ? '#6fa06f' : 'var(--dim)');
+      /* 流量只在真有贸易时才占位置 —— 平时那行留给供需，别把面板塞满 */
+      var flow = r.net > 0.5 ? '出口 ' + fmtInt(r.net)
+        : (r.net < -0.5 ? '进口 ' + fmtInt(-r.net) : '');
+      dom.sub.textContent = flow
+        ? '供 ' + fmtInt(r.supply) + ' · 需 ' + fmtInt(r.demand) + ' · ' + flow
+        : '供 ' + fmtInt(r.supply) + ' · 需 ' + fmtInt(r.demand) +
+          ' · ' + (r.balance >= 0 ? '盈余 ' : '缺口 ') + fmtInt(Math.abs(r.balance));
       var w = Math.max(0, Math.min(1, r.rel / 2)) * 100;
       dom.fill.style.width = w + '%';
       dom.fill.style.background = dev > 0.18 ? 'var(--bad)' : (dev < -0.18 ? '#5f8fb0' : 'var(--gold-dim)');
@@ -290,6 +310,43 @@
       '<div class="anote">' + (needy > 0
         ? needy + ' 个省份需要赈济，每月 ' + fmtMoney(bill) + '，为期 ' + SIM.RELIEF_MONTHS + ' 个月。'
         : '当前没有省份需要赈济。') + '</div>';
+
+    /* 通商：接进跨国市场之后新增的国家级决策。
+     * 它同时管两件事 —— 本国价与世界价的耦合程度（保护生产者 / 坑消费者），
+     * 以及关税率（闭关能从进口里抽走多少进国库）。
+     * 面板上必须把「可达性」和「贸易余额」一起摆出来：
+     * 前者告诉你地理给了你什么，后者告诉你现在的政策在往哪个方向走。 */
+    var open = world.tradeOpen[countryId];
+    var tb = world.tradeBalance[countryId];
+    var acc = world.access[countryId];
+    var lam = world.tradeWeight[countryId];
+    var openLabel = open > 0.85 ? '自由贸易' : (open > 0.45 ? '有关税' : (open > 0.05 ? '重关税' : '闭关'));
+    /* 最大出口 / 最大进口。为什么要专门列出来：
+     * 在禀赋比较均匀的地图上，开关税的收益可能只有百分之几（实测 0.4%）——
+     * 那是**正确**的结果，不是没做出来。但玩家需要知道自己到底在拿什么换什么，
+     * 否则这个开关看起来就是死的。先把「你在卖什么、在买什么」摆出来，
+     * 收益大小玩家自己在市场行情那一栏里对照。 */
+    var topEx = -1, topExV = 0.5, topIm = -1, topImV = 0.5;
+    for (var tg = 0; tg < world.G; tg++) {
+      var ex = world.expo[tg * world.C + countryId], im = world.impo[tg * world.C + countryId];
+      if (ex > topExV) { topExV = ex; topEx = tg; }
+      if (im > topImV) { topImV = im; topIm = tg; }
+    }
+    var flowLine = (topEx < 0 && topIm < 0)
+      ? '本国与世界的价差很小 —— 这个国家基本上自给自足，开关税赚不到什么。'
+      : '最大出口：<b>' + (topEx < 0 ? '无' : SIM.GOODS[topEx].name + ' ' + fmtInt(topExV)) +
+        '</b>　最大进口：<b>' + (topIm < 0 ? '无' : SIM.GOODS[topIm].name + ' ' + fmtInt(topImV)) + '</b>';
+    html += '<div class="section-title">通商</div>' +
+      '<div class="kv"><span>地理可达性</span><b>' + pct(acc) + '</b></div>' +
+      '<div class="kv"><span>市场整合度</span><b>' + pct(lam) + '</b></div>' +
+      '<div class="kv"><span>贸易余额</span><b class="' + (tb >= 0 ? 'good' : 'bad') + '">' +
+        (tb >= 0 ? '顺差 ' : '逆差 ') + fmtMoney(Math.abs(tb)) + '</b></div>' +
+      '<div class="row" style="gap:6px">' +
+      '<button class="abtn" data-open="1">自由贸易</button>' +
+      '<button class="abtn" data-open="0.5">有关税</button>' +
+      '<button class="abtn" data-open="0">闭关</button></div>' +
+      '<div class="anote">当前：<b>' + openLabel + '</b>（开放度 ' + pct(open) + '）。</div>' +
+      '<div class="anote">' + flowLine + '</div>';
 
     el.selName.textContent = c.name;
     el.selSub.innerHTML = '<span class="tagpill">' + c.tag + '</span>';

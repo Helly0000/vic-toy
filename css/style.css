@@ -251,6 +251,17 @@ html, body {
 
 .row .nm { flex: 1 1 auto; font-size: 12.5px; color: var(--paper); }
 .row .nm small { display: block; font-size: 10px; color: var(--paper-dim); letter-spacing: .04em; }
+/* 世界价。它比本国价小一号、更暗，因为它是一把**尺子**而不是主角：
+ * 玩家要看的是「本国 1.12」旁边那个「世 1.08」有没有被甩开。
+ * tabular-nums 必须留着，否则数字一变动整行会左右抖。 */
+.row .wld {
+  flex: 0 0 auto;
+  font: 400 10.5px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
 
 .num {
   font-family: var(--mono);

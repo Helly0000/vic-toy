@@ -78,9 +78,20 @@
           },
           onRelief: function () {
             var on = world.reliefOn[activeCountry] ? 0 : 1;
-            VIC.sim.pushCommand(world, VIC.sim.CMD_RELIEF, -1, 0, on);
+            VIC.sim.pushCommand(world, VIC.sim.CMD_RELIEF, -1, 0, on, activeCountry);
             /* 命令照常入队，但立刻消费一次：否则按钮要等下一个 tick 才变色，
              * 玩家会以为没点上。入队 + 消费都走 sim 的公开接口，没有绕过后门。 */
+            VIC.sim.applyCommands(world);
+            VIC.ui.showCountryOverview(world, activeCountry);
+            refreshAll(false);
+          },
+
+          /* 通商政策：同样只入队 + 立刻消费一次，让按钮即时生效。
+           * 注意它是**一国的制度**，所以必须把 activeCountry 一起带上 ——
+           * 这个参数是这次接跨国市场时补上的（之前 pushCommand 根本没有它，
+           * 于是赈灾一直在给 0 号国发钱）。 */
+          onTrade: function (open) {
+            VIC.sim.pushCommand(world, VIC.sim.CMD_TRADE, -1, 0, open, activeCountry);
             VIC.sim.applyCommands(world);
             VIC.ui.showCountryOverview(world, activeCountry);
             refreshAll(false);

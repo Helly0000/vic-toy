@@ -93,14 +93,25 @@
   var CMD_BUILD = 1;
   var CMD_RELIEF = 2;
   var CMD_SET_AUTO = 3;
+  var CMD_TRADE = 4;      // 通商政策：value = 开放度 0..1（0 = 闭关，1 = 自由贸易）
 
-  function pushCommand(w, kind, prov, good, value) {
+  /* country 是给「一国的制度」用的（赈灾、通商政策）。
+   * 建造不需要它 —— 省份已经隐含了国家。
+   *
+   * 踩过的坑：前四个参数之外原本没有 country，而 applyCommands 里一直是
+   * `w.cmdCountry[i]` 在读它。也就是说 CMD_RELIEF **一直在给 0 号国赈灾**，
+   * 不管玩家在看哪个国家。之所以没被发现，是因为张力台恰好扮演 0 号国、
+   * 主循环默认选中的也是人口最多的那个（在 seed 8888 上正好是 0 号）。
+   * 两个巧合叠在一起，把一个真 bug 藏了整整一版。
+   * 教训：UI 与测试台「走同一条路」还不够，这条路上的**每一个参数**都要真的被走过。 */
+  function pushCommand(w, kind, prov, good, value, country) {
     var next = (w.cmdTail + 1) % CMD_CAP;
     if (next === w.cmdHead) { w.cmdDropped++; return false; }   // 队列满：丢掉并记账
     w.cmdKind[w.cmdTail] = kind;
     w.cmdProv[w.cmdTail] = prov;
     w.cmdGood[w.cmdTail] = good;
     w.cmdValue[w.cmdTail] = value || 0;
+    w.cmdCountry[w.cmdTail] = country || 0;
     w.cmdTail = next;
     return true;
   }
@@ -118,6 +129,51 @@
   var INVEST_RATE = 0.06;     // 每 tick 拿多少比例的收入去投资
   var PRICE_SMOOTH = 0.42;    // 价格向目标收敛的速度
   var PRICE_ELASTIC = 0.68;   // 供需比对价格的弹性
+
+  /* ---------------- 跨国市场 ----------------
+   *
+   * 为什么要它：封闭市场里，专业化**赚不到额外收益**。
+   * 实测（test/trade-probe.js，等价格收敛后）：收入对自身产出的弹性只有 0.546 ——
+   * 把全国都建成农场，粮价就被自己砸下来；把禀赋最好的商品翻倍，
+   * 人均产值只涨 4.5%~8.9%。地理因此决定不了国运，地图只是配色。
+   *
+   * 模型形状（刻意做成一个可标定的约化式，而不是完整的一般均衡）：
+   *   1) 世界价 pw = base × (世界总需求 / 世界总供给)^PRICE_ELASTIC
+   *      —— 与国内定价**同一条公式**，只是把求和范围从一国换成全世界
+   *   2) 各国的封闭价 pa 仍按老公式逐国算（不是为了用它，是为了留作对照与显示）
+   *   3) 实际价 target = pa^(1−λ) × pw^λ      λ = 市场整合度 ∈ [0,1]
+   *      λ=0 完全封闭（本作原来的行为），λ=1 完全一体化（本国价就是世界价）
+   *   4) λ = TRADE_LAMBDA × 政策开放度 × 地理可达性 × 该商品的贸易品程度
+   *
+   * 两个刻意的选择，都是为了以后不被自己坑：
+   *   · 用**几何**混合而不是线性：价格是正数，「翻倍/减半」才是它该有的对称性；
+   *     线性混合会随着 λ 变化悄悄改变价格的量纲。
+   *   · 不做成真正的多边出清：本模型的消费需求对价格**完全无弹性**
+   *     （NEEDS 是固定篮子，CONSUME 不看价格），所以根本不存在一个「让世界出清」的价格。
+   *     现有定价本来就是「稀缺度加成」而不是均衡价，跨国这一层沿用同一套语言，
+   *     不假装它是均衡。 */
+  /* 标定结论（test/trade-sweep.js，seed 8888，240 tick）：
+   *   运输技术   弹性    结构分化   本国价偏离世界价   各国 λ 的极差
+   *      0     0.537     0.029        0.051             0.000     ← 接入前的旧行为
+   *     1.0    0.792     0.048        0.034             0.268
+   *     1.3    0.862     0.059        0.026             0.348     ← 取这一档
+   *     1.6    0.923     0.070        0.016             0.428
+   *   两个反直觉的读数，都值得记下来：
+   *     · 一体化**没有**抹平结构差异，反而放大了它（0.029 → 0.059）。
+   *       原本担心「大家看到一个世界价 → 都建同样的东西」，实测是反的：
+   *       统一的价格信号 + 各省不同的 geoBonus，才让比较优势真正显形。
+   *     · 弹性推到 0.98 需要 λ 均值 0.94，那时本国价与世界价的偏离只剩 0.9%，
+   *       「本国价 vs 世界价」这条信息在 UI 上就看不见了，地理也就没了抓手。
+   *   取 1.3 = 专业化已经明显有回报（0.86，接近小国开放的极限 1.0），
+   *   同时各国 λ 还差 1.9 倍、价偏离还有 2.6% —— 地理与政策都还留着力。 */
+  var TRADE_LAMBDA = 1.30;               // 运输技术：把「可达份额」放大成整合度的总闸（标定台 test/trade-sweep.js）
+  var TRADE_D0 = 260;                    // 引力衰减尺度（地图坐标；地图宽 1600）
+  var SEA_COST = 1.30;                   // 跨海边的距离倍率
+  /* 各商品的贸易品程度。谷物最好运（人也得吃饭），奢侈品最不好运
+   * （高价值低重量，但需求高度本地化、且是身份消费）。
+   * 这一列以后是「石油」「粮食禁运」这类题材的抓手。 */
+  var TRADABILITY = [1.00, 0.92, 0.70, 0.88, 0.62];
+  var TARIFF_MAX = 0.25;                 // 闭关到底能收多少关税（开放度=0 时的关税率）
 
   /* 升级成本随规模加速上升 —— 这是防止 300 tick 后全世界堆满建筑的唯一刹车 */
   function investCost(totalLv) {
@@ -193,6 +249,33 @@
       provCount: new Float32Array(C),
       lowWealthAcc: new Float32Array(C),
       lowPopAcc: new Float32Array(C),
+      tradeBalance: new Float32Array(C),   // 净出口值（按世界价计价，全世界加起来恰好为 0）
+      tradeGross: new Float32Array(C),     // 贸易总额（进出口之和，显示用）
+      tariffPaid: new Float32Array(C),     // 累计关税收入
+      // 中间量，预分配
+      potExpo: new Float32Array(C),
+      potImpo: new Float32Array(C),
+
+      // —— 跨国市场 ——
+      dist: new Float32Array(C * C),       // 国与国之间的商路距离（静态，开局算一次）
+      access: new Float32Array(C),         // 地理可达性 0..1
+      tradeOpen: new Float32Array(C),      // 政策开放度 0..1（玩家可改）
+      tradeWeight: new Float32Array(C),    // λ：市场整合度（每 tick 现算）
+      /* 这两个是「世界设定」而不是「世界状态」：默认取模块常量，
+       * 但可以在 createWorld 的 opts 里覆盖 —— 标定台靠它扫参数（test/trade-sweep.js）。
+       * 运输技术将来也可以随时代/科技推进，所以放在世界里而不是写死在函数里。 */
+      tradeLambda: (opts.tradeLambda !== undefined) ? opts.tradeLambda : TRADE_LAMBDA,
+      tradeD0: (opts.tradeD0 !== undefined) ? opts.tradeD0 : TRADE_D0,
+      worldPrice: new Float32Array(G),
+      worldSupply: new Float32Array(G),
+      worldDemand: new Float32Array(G),
+      autarky: new Float32Array(G * C),    // 各国的封闭价（对照与显示用）
+      expo: new Float32Array(G * C),       // 出口量
+      impo: new Float32Array(G * C),       // 进口量
+      expoTot: new Float32Array(G),        // 全世界该商品的潜在出口 / 进口（逐商品平账用）
+      impoTot: new Float32Array(G),
+      expoScale: new Float32Array(G),      // 逐商品的出口侧 / 进口侧平账系数
+      impoScale: new Float32Array(G),
 
       // —— 玩家命令层（预分配环形队列）——
       cmdKind: new Uint8Array(CMD_CAP),
@@ -382,6 +465,11 @@
      * 于是开局把 0 当成「灾情 100%」，每 tick 都在衰减一个并不存在的灾年，
      * 谷物价格直接飙到基准的 2.04 倍。零值在这里是个合法数值，必须显式写成 1。 */
     w.harvestShock.fill(1);
+    /* 跨国市场：商路距离是静态地理，开局算一次；通商政策默认全开放。
+     * 初始价 = 基准价，但预热会把世界价与各国价一起推到有差异的位置。 */
+    w.dist.fill(Infinity);
+    w.tradeOpen.fill(1);
+    buildTradeDistances(w);
     refreshLevelCaps(w);      // 开局先刷一次，之后每 tick 跟随人口
     for (var warm = 0; warm < 3; warm++) tick(w);
     w.warmed = true;   // 预热不再触发灾情：开局不该在第 0 个月就挨一次歉收
@@ -413,6 +501,117 @@
         if (cap < 1) cap = 1;
         w.levelCap[g * P + p] = cap;
       }
+    }
+  }
+
+  /* ---------------- 跨国市场：地理 ---------------- */
+
+  /* 国与国之间的**商路距离**：在省图上跑最短路，而不是量两个首都之间的直线。
+   *
+   * 为什么要绕这一道：直线距离不知道「中间隔着谁」。两个只隔一道海峡的国家，
+   * 和两个隔着三个国家、两条山脉的国家，直线距离可以一样，商路距离差好几倍。
+   * 而决定贸易的是后者。
+   *
+   * 边的权重 = 两省中心的直线距离 × 跨海倍率。
+   * 「这条边是不是跨海」用两省中心连线的**中点**落在陆地还是水面来判断 ——
+   * 用一个像素去问一次地图，比自己去重建海岸线简单得多，精度也够。
+   *
+   * 算法：每个国家做一次多源 Dijkstra（源 = 它的全部省份，初值 0），
+   * 得到的到各省距离里、取目标国各省的最小值，就是两国的商路距离。
+   * 复杂度 O(C·P²) = 8 × 260² ≈ 54 万次，开局一次性，可以忽略。
+   * 刻意不用优先队列：省一个数据结构，也省得解释。 */
+  var MAX_NB = 12;    // 一个省最多记几条邻边（Voronoi 胞通常 5~7 条）
+
+  function buildTradeDistances(w) {
+    var map = w.map, P = w.P, C = w.C;
+    var W = map.width, H = map.height, mask = map.mask;
+
+    var nIdx = new Int32Array(P * MAX_NB);
+    var nW = new Float32Array(P * MAX_NB);
+    var nCount = new Int32Array(P);
+
+    for (var p = 0; p < P; p++) {
+      var prov = map.provinces[p];
+      var nb = prov.neighbors || [];
+      var k = 0;
+      for (var e = 0; e < nb.length && k < MAX_NB; e++) {
+        var q = nb[e];
+        if (q < 0 || q >= P) continue;
+        var dx = map.provinces[q].cx - prov.cx;
+        var dy = map.provinces[q].cy - prov.cy;
+        var d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 1) d = 1;
+        // 中点落在水里 ⇒ 这条边要过海
+        var mx = ((prov.cx + map.provinces[q].cx) * 0.5) | 0;
+        var my = ((prov.cy + map.provinces[q].cy) * 0.5) | 0;
+        var sea = 0;
+        if (mx >= 0 && mx < W && my >= 0 && my < H) sea = mask[my * W + mx] ? 0 : 1;
+        else sea = 1;
+        nIdx[p * MAX_NB + k] = q;
+        nW[p * MAX_NB + k] = d * (sea ? SEA_COST : 1);
+        k++;
+      }
+      nCount[p] = k;
+    }
+
+    var dist = new Float32Array(P);
+    var done = new Uint8Array(P);
+    for (var c = 0; c < C; c++) {
+      dist.fill(Infinity);
+      done.fill(0);
+      for (var s = 0; s < P; s++) if (map.provinces[s].country === c) dist[s] = 0;
+      for (var it = 0; it < P; it++) {
+        var best = -1, bd = Infinity;
+        for (var a = 0; a < P; a++) if (!done[a] && dist[a] < bd) { bd = dist[a]; best = a; }
+        if (best < 0) break;
+        done[best] = 1;
+        var base = best * MAX_NB, n = nCount[best];
+        for (var e2 = 0; e2 < n; e2++) {
+          var to = nIdx[base + e2];
+          var nd = bd + nW[base + e2];
+          if (nd < dist[to]) dist[to] = nd;
+        }
+      }
+      for (var t2 = 0; t2 < P; t2++) {
+        var tc = map.provinces[t2].country;
+        if (dist[t2] < w.dist[c * C + tc]) w.dist[c * C + tc] = dist[t2];
+      }
+      w.dist[c * C + c] = 0;
+    }
+  }
+
+  /* 地理可达性 = **你能触达的世界市场比重**。
+   *   access_c = Σ_{o≠c} (人口_o / 他国总人口) × exp(−商路距离 / D0)
+   * 取值天然落在 [0,1]，含义直接：1 = 全世界都挨着你，0 = 你在天边。
+   *
+   * 为什么不用 saturating 的 succ/(succ+A0)：第一版就是那么写的，实测
+   * 八个国家的 access 全落在 0.687~0.719 —— 地理几乎不起作用。
+   * 原因是地图上八国本就首尾相连，succ 都差不多，再套一个饱和函数
+   * 等于把仅有的差别压平。份额加权的写法保留了「你的伙伴离你多远」这个差别的**全部**。
+   *
+   * 市场规模用**人口**而不是 GDP：GDP 是内生的、会崩的，
+   * 用它会让「邻居垮了 → 我也做不成生意 → 我也垮」变成一条正反馈回路。
+   * 人口也会变，但它是缓变量 —— 这里要问的是「你在世界的哪个位置」，
+   * 不是「谁今年景气」。
+   *
+   * 每 tick 重算：C² = 64 次乘加，比一次开方还便宜。 */
+  function refreshAccess(w) {
+    var C = w.C;
+    var totalPop = 0;
+    for (var c = 0; c < C; c++) totalPop += w.popTotal[c];
+    if (totalPop <= 0) { w.access.fill(0); w.tradeWeight.fill(0); return; }
+    for (var c2 = 0; c2 < C; c2++) {
+      var others = totalPop - w.popTotal[c2];
+      if (others <= 0) { w.access[c2] = 0; w.tradeWeight[c2] = 0; continue; }
+      var reach = 0;
+      for (var o = 0; o < C; o++) {
+        if (o === c2) continue;
+        var d = w.dist[c2 * C + o];
+        if (!(d < Infinity)) continue;             // 没有陆路/海路相通
+        reach += (w.popTotal[o] / others) * Math.exp(-d / w.tradeD0);
+      }
+      w.access[c2] = reach;
+      w.tradeWeight[c2] = w.tradeLambda * w.tradeOpen[c2] * reach;
     }
   }
 
@@ -470,16 +669,111 @@
       }
     }
 
-    /* 4) 市场清算定价 */
+    /* 4) 市场清算定价 —— 从「一国一价」改成「世界价 + 各国对世界的接入程度」
+     *
+     * 三步，缺一不可：
+     *   4a 世界总量 → 世界价（与国内定价同一条公式，只换了求和范围）
+     *   4b 地理可达性 → 市场整合度 λ
+     *   4c 各国价 = 封闭价与世界价的几何混合
+     *   4d 贸易流量（供显示、供关税、供以后的封锁用）
+     *
+     * 注意 4d **不反过来影响本 tick 的价格**。价格已经通过 λ 把
+     * 「多余的能卖到外面去」这件事计进去了；再按流量算一遍就是重复计提，
+     * 而且会引入一条自己咬自己的回路（价→量→价），标定会变成噩梦。 */
+    w.worldSupply.fill(0);
+    w.worldDemand.fill(0);
     for (c = 0; c < C; c++) {
       for (g = 0; g < G2; g++) {
-        var sup = Math.max(w.supply[g * C + c], 0.001);
-        var dem = w.demand[g * C + c];
-        var ratio = dem / sup;
-        var target = GOODS[g].base * clamp(Math.pow(ratio, PRICE_ELASTIC), 0.28, 3.4);
+        w.worldSupply[g] += w.supply[g * C + c];
+        w.worldDemand[g] += w.demand[g * C + c];
+      }
+    }
+    for (g = 0; g < G2; g++) {
+      var ws = Math.max(w.worldSupply[g], 0.001);
+      w.worldPrice[g] = GOODS[g].base *
+        clamp(Math.pow(w.worldDemand[g] / ws, PRICE_ELASTIC), 0.28, 3.4);
+    }
+
+    /* 可达性用的是上一 tick 的人口（国家统计在第 8 步）。
+     * 一 tick 的滞后在 100 年的尺度上无所谓，换来的是明确的先后次序。 */
+    refreshAccess(w);
+
+    for (c = 0; c < C; c++) {
+      var lam0 = w.tradeWeight[c];
+      for (g = 0; g < G2; g++) {
         var key2 = g * C + c;
+        var sup = Math.max(w.supply[key2], 0.001);
+        var dem = w.demand[key2];
+        var pa = GOODS[g].base * clamp(Math.pow(dem / sup, PRICE_ELASTIC), 0.28, 3.4);
+        w.autarky[key2] = pa;
+        var lam = lam0 * TRADABILITY[g];
+        if (lam > 1) lam = 1;
+        var target = Math.pow(pa, 1 - lam) * Math.pow(w.worldPrice[g], lam);
         w.price[key2] = w.price[key2] * (1 - PRICE_SMOOTH) + target * PRICE_SMOOTH;
       }
+    }
+
+    /* 4d) 贸易流量。
+     * 口径：能出口的 = 本国过剩 × 整合度；能进口的 = 本国缺口 × 整合度。
+     * 然后按较小的一边**等比例缩放**，让全世界的出口量恰好等于进口量。
+     * 为什么必须缩放：这是一本账。出口总和 ≠ 进口总和 的账本，
+     * 缩放因子本身也是信息 —— 世界性过剩（大家都在卖、没人买）会把它压到 1 以下。
+     *
+     * ⚠ 缩放必须**逐商品**做，不能只算一个全局因子。
+     * 踩过的坑：第一版用全局 covered = min(Σ所有商品出口, Σ所有商品进口) 去缩两边，
+     * 结果「全世界出口量 = 全世界进口量」成立了，但**分商品的账不平**。
+     * 而贸易余额是按世界价逐商品加权的，于是全球贸易余额合计 = 47317 而不是 0 ——
+     * 凭空多出来的钱。逐商品缩放之后每一项都归零。
+     * 商品之间不能互相抵账：谷物卖不掉不能用木材的买家来平。 */
+    /* 先逐国逐商品算出「想卖多少 / 想买多少」，再逐商品平账 */
+    w.expoTot.fill(0);
+    w.impoTot.fill(0);
+    for (c = 0; c < C; c++) {
+      var lamC = w.tradeWeight[c];
+      for (g = 0; g < G2; g++) {
+        var key3 = g * C + c;
+        var lg = lamC * TRADABILITY[g];
+        if (lg > 1) lg = 1;
+        var bal = w.supply[key3] - w.demand[key3];
+        var ex = bal > 0 ? bal * lg : 0;
+        var im = bal < 0 ? -bal * lg : 0;
+        w.expo[key3] = ex;
+        w.impo[key3] = im;
+        w.expoTot[g] += ex;
+        w.impoTot[g] += im;
+      }
+    }
+    for (g = 0; g < G2; g++) {
+      var te = w.expoTot[g], ti = w.impoTot[g];
+      var cov = te < ti ? te : ti;
+      w.expoScale[g] = te > 1e-9 ? cov / te : 0;
+      w.impoScale[g] = ti > 1e-9 ? cov / ti : 0;
+    }
+
+    w.tradeBalance.fill(0);
+    w.tradeGross.fill(0);
+    for (c = 0; c < C; c++) {
+      var tb = 0, gross = 0, duty = 0;
+      /* 开放度同时管两件事：
+       *   a) 它已经在 λ 里，闭关 = 本国价与外国价脱钩（保护生产者，坑消费者）
+       *   b) 它还是关税率：开放度 0 → 关税 TARIFF_MAX，进口值抽一道进国库
+       * 这不是重复收费，而是保护主义的两个真实后果。 */
+      var open = w.tradeOpen[c];
+      for (g = 0; g < G2; g++) {
+        var key4 = g * C + c;
+        var e3 = w.expo[key4] * w.expoScale[g];
+        var m3 = w.impo[key4] * w.impoScale[g];
+        w.expo[key4] = e3;
+        w.impo[key4] = m3;
+        var pw = w.worldPrice[g];
+        tb += (e3 - m3) * pw;
+        gross += (e3 + m3) * pw;
+        duty += m3 * pw * (1 - open) * TARIFF_MAX;
+      }
+      w.tradeBalance[c] = tb;      // 按世界价计，全世界加起来恰好为 0
+      w.tradeGross[c] = gross;
+      w.treasuryGain[c] += duty;
+      w.tariffPaid[c] += duty;
     }
 
     /* 5) 收入分配 + 支出 */
@@ -751,12 +1045,35 @@
         }
       } else if (kind === CMD_SET_AUTO) {
         w.autoInvest = w.cmdValue[i] > 0.5;
+      } else if (kind === CMD_TRADE) {
+        /* 通商政策。用 cmdCountry 而不是 cmdProv：这是一国的制度，不是一省的工程。 */
+        var tc = w.cmdCountry[i];
+        if (tc >= 0 && tc < w.C) {
+          var ov = w.cmdValue[i];
+          if (ov < 0) ov = 0;
+          if (ov > 1) ov = 1;
+          w.tradeOpen[tc] = ov;
+        }
       }
       w.cmdHead = (w.cmdHead + 1) % CMD_CAP;
     }
   }
   function detectEvents(w) {
     var C = w.C, G2 = w.G, P = w.P, i;
+
+    /* 0) 世界行情 —— 接进跨国市场之后，玩家最该被提醒的是"全世界都在缺什么"。
+     * 它和下面第 1 条（本国的价格极端）是两件事：本国粮价高可能只是本国的问题，
+     * 世界粮价高则是所有人一起在抢。混在一句里说，玩家分不出该怪谁。 */
+    for (var gw = 0; gw < G2; gw++) {
+      var wr = w.worldPrice[gw] / GOODS[gw].base;
+      if (wr > 1.25) {
+        maybePush(w, '世界市场的' + GOODS[gw].name + '涨到基准价的 ' + (wr * 100).toFixed(0) +
+          '%，各国都在抢，进口国尤其吃紧。', 'bad', 'w-hi-' + gw);
+      } else if (wr < 0.75) {
+        maybePush(w, '世界市场的' + GOODS[gw].name + '跌到基准价的 ' + (wr * 100).toFixed(0) +
+          '%，出口国正在被自己的产量压价。', 'bad', 'w-lo-' + gw);
+      }
+    }
 
     /* 1) 价格极端 —— 谁的商品在暴涨，谁的在崩盘 */
     for (var g = 0; g < G2; g++) {
@@ -851,7 +1168,14 @@
         gdpDelta: w.gdp[c] - prev,
         pop: w.popTotal[c],
         unrest: w.unrestAvg[c],
-        treasury: w.treasury[c]
+        treasury: w.treasury[c],
+        // —— 跨国市场 ——
+        access: w.access[c],
+        tradeOpen: w.tradeOpen[c],
+        tradeWeight: w.tradeWeight[c],
+        tradeBalance: w.tradeBalance[c],
+        tradeGross: w.tradeGross[c],
+        tariffPaid: w.tariffPaid[c]
       });
     }
     rows.sort(function (a, b) { return b.gdp - a.gdp; });
@@ -861,9 +1185,10 @@
   function marketRows(w, countryId) {
     var rows = [];
     for (var g = 0; g < w.G; g++) {
-      var price = w.price[g * w.C + countryId];
-      var sup = w.supply[g * w.C + countryId];
-      var dem = w.demand[g * w.C + countryId];
+      var key = g * w.C + countryId;
+      var price = w.price[key];
+      var sup = w.supply[key];
+      var dem = w.demand[key];
       rows.push({
         id: g,
         key: GOODS[g].key,
@@ -875,7 +1200,15 @@
         rel: price / GOODS[g].base,
         supply: sup,
         demand: dem,
-        balance: sup - dem
+        balance: sup - dem,
+        // —— 跨国市场 ——
+        worldPrice: w.worldPrice[g],
+        worldRel: w.worldPrice[g] / GOODS[g].base,
+        autarky: w.autarky[key],
+        autarkyRel: w.autarky[key] / GOODS[g].base,
+        expo: w.expo[key],
+        impo: w.impo[key],
+        net: w.expo[key] - w.impo[key]
       });
     }
     return rows;
@@ -931,8 +1264,10 @@
     CMD_BUILD: CMD_BUILD,
     CMD_RELIEF: CMD_RELIEF,
     CMD_SET_AUTO: CMD_SET_AUTO,
+    CMD_TRADE: CMD_TRADE,
     BUILD_MONTHS: BUILD_MONTHS,
     RELIEF_COST: RELIEF_COST,
-    RELIEF_MONTHS: RELIEF_MONTHS
+    RELIEF_MONTHS: RELIEF_MONTHS,
+    refreshAccess: refreshAccess
   };
 })(typeof window !== 'undefined' ? window : globalThis);
