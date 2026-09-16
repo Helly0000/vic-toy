@@ -94,6 +94,7 @@
   var CMD_RELIEF = 2;
   var CMD_SET_AUTO = 3;
   var CMD_TRADE = 4;      // 通商政策：value = 开放度 0..1（0 = 闭关，1 = 自由贸易）
+  var CMD_INFRA = 5;      // 修基建：prov = 省份
 
   /* country 是给「一国的制度」用的（赈灾、通商政策）。
    * 建造不需要它 —— 省份已经隐含了国家。
@@ -166,6 +167,80 @@
    *       「本国价 vs 世界价」这条信息在 UI 上就看不见了，地理也就没了抓手。
    *   取 1.3 = 专业化已经明显有回报（0.86，接近小国开放的极限 1.0），
    *   同时各国 λ 还差 1.9 倍、价偏离还有 2.6% —— 地理与政策都还留着力。 */
+  /* 价格上下限。这两个数字看着像防爆保护，其实是**设计决策**：
+   * 它们决定了「供给不足」能有多少从价格渠道出去、有多少必须从数量渠道出去。
+   *   VIC3 是 [0.25, 1.75]（它的公式是 base × (1 + 0.75 × 失衡比)）
+   *   我们是 [0.28, 3.40] —— 上限比它高一倍
+   * 谁高谁低不是"谁更真"，而是两种不同的传导方式。标定台 test/price-ceiling.js
+   * 量的就是这件事：把上限收进 VIC3 的量级，世界会变成什么样。
+   * 可通过 createWorld 的 opts 覆盖（扫描用）。 */
+  /* ---------------- 省 ↔ 国的接入层（基建） ----------------
+   *
+   * 动机：现在一个省生产的东西直接进国家池子，全国所有省面对同一个国家价 ——
+   * 等于假设**全国的路都是免费的**。VIC3 不是这样，它有
+   *     Local Price = MAPI × Market Price + (1 − MAPI) × State Price
+   * 一个州跟全国市场连得不好，卖东西收得少、买东西付得多，中间那道差价是真金白银。
+   * 铁路 / 港口 / 电报该住的地方，就是这个被我们跳过的夹层。
+   *
+   * 接法与跨国那层**同形**（几何混合，串成一条链）：
+   *     省价 = 省的封闭价^(1−conn) × 国家价^conn
+   *     国家价 = 国的封闭价^(1−λ)   × 世界价^λ
+   * 于是 省 → 国 → 世界 三级，和 VIC3 的 州 → 全国 → 世界 同构。
+   *
+   * 为什么这层顺带救活了价格天花板（见 test/price-ceiling.js）：
+   * 天花板现在是个死参数，因为**国家级市场把所有省份平均掉了** ——
+   * 一个省的歉收扔进国家池子根本不算事（常态供需比最大 1.62，0.00% 撞墙）。
+   * 接入这一层之后，conn 低的省调不到外面的货，它的本地供需比会真的走极端，
+   * 天花板立刻从摆设变成饥荒的杀伤力旋钮。
+   *
+   * 地理决定的是**天花板**（能连通到什么程度），不是起点：
+   * 沿海和城市的省能修到很密的路网，内陆深处修不动。
+   * 起点统一给天花板的 30%，这样每个省都有得投、也都投得起。 */
+  /* 标定（test/infra-test.js）：
+   * 第一版写的是 CONN_BASE=0.60 / K=3.00，实测连通度全挤在 0.651~0.741 ——
+   * 极差 0.09，等于没做。**这是同一个错误的第二次**：世界层那次也是饱和函数
+   * 把仅有的差别压平（当时是 succ/(succ+A0)），我换了张皮又写了一遍。
+   * 病根是基底给得太高：conn=0.167 意味着"一级路都没有的省"也已经 83% 接进国家市场，
+   * 那"路不通"这件事就没代价了。
+   * 现在压到 CONN_BASE=0.35，一级基建都没有的省是真孤立。 */
+  var CONN_BASE = 0.35;        // 一级基建都没有时的底子（人扛马驮，不是完全隔绝）
+  var CONN_K = 4.50;           // 连通度的饱和尺度
+  /* 开局基建 = 天花板的这个比例。刻意给得很低：
+   * 1836 年本来就没有"全国市场"，内陆省份是各自的小世界；
+   * 整个 19 世纪的故事就是修铁路把它们缝起来。给 0.30 的话开局就已经缝好了。 */
+  var INFRA_INIT = 0.15;
+  /* 省价的偏离上限。加这一条是因为退化情形：
+   * 一个完全不产工具的省，省级供需比会趋于无穷（output 被 max(·, 0.001) 兜着），
+   * 省价直接顶到 3.4 倍。但现实里再差的路也是路，内陆省的工具是从外面买的。
+   * 这个带子就是"运输成本不可能无限大"，同时让零产量的商品不至于发疯。 */
+  var LOCAL_BAND = 2.20;
+  /* 天花板的三项。
+   * 第二项乘的是「沿海度」而不是"离海距离"本身 —— 见 refreshInfraCaps 里的说明：
+   * 距离的绝对尺度随地图大小变，直接喂进指数会得到一段没用的平台期。 */
+  /* 基础项给 4.0 而不是 1.0，是**为了玩家杠杆**：
+   * 实测最需要修路的省内陆省天花板只有 3.3~5，而开局基建 = 天花板的 15%，
+   * 于是它们只剩 3~4 级的空间 —— 玩家想使劲的地方正好没空间，
+   * 测量出来"修基建只提升人均产值 0.1%"。地理该决定**能修多少**，不该决定**有没有得修**。 */
+  var INFRA_CAP_BASE = 4.0;      // 每个省都有得修，内陆深处也不例外
+  /* 沿海项从 7.0 拉到 10.0：基础项抬到 4.0 之后，天花板的**相对**差距被压窄了，
+   * 连通度极差从 0.24 掉到 0.11 —— 那是"每个省都有得修"的代价，得从沿海项补回来。
+   * 两项的分工：基础项保证**有没有得修**（玩家杠杆），沿海项保证**差多少**（地理）。 */
+  var INFRA_CAP_COAST = 10.0;    // 靠海额外给多少
+  var INFRA_CAP_URBAN = 3.0;     // 城市化
+  /* 380 太便宜了：实测 AI 在 240 tick（20 年）内就把全国修到顶，
+   * 之后 100 年一动不动 —— 基建会退化成"开局 20 年的机制"，
+   * 和当年"1200 tick 后全图满级"是同一个毛病。
+   * 同期的工厂是 investCost(总级 15) ≈ 2360，所以一级基建要定价在同一个量级。
+   * 现在 infraCost(1)=1812 / infraCost(5)=5700 / infraCost(10)=13800。 */
+  var INFRA_COST_BASE = 1200;
+  var INFRA_MONTHS = 4;
+  function infraCost(level) {
+    return INFRA_COST_BASE * (1 + level * 0.45 + level * level * 0.06);
+  }
+
+  var PRICE_FLOOR = 0.28;
+  var PRICE_CEIL = 3.40;
+
   var TRADE_LAMBDA = 1.30;               // 运输技术：把「可达份额」放大成整合度的总闸（标定台 test/trade-sweep.js）
   var TRADE_D0 = 260;                    // 引力衰减尺度（地图坐标；地图宽 1600）
   var SEA_COST = 1.30;                   // 跨海边的距离倍率
@@ -264,6 +339,8 @@
       /* 这两个是「世界设定」而不是「世界状态」：默认取模块常量，
        * 但可以在 createWorld 的 opts 里覆盖 —— 标定台靠它扫参数（test/trade-sweep.js）。
        * 运输技术将来也可以随时代/科技推进，所以放在世界里而不是写死在函数里。 */
+      priceFloor: (opts.priceFloor !== undefined) ? opts.priceFloor : PRICE_FLOOR,
+      priceCeil: (opts.priceCeil !== undefined) ? opts.priceCeil : PRICE_CEIL,
       tradeLambda: (opts.tradeLambda !== undefined) ? opts.tradeLambda : TRADE_LAMBDA,
       tradeD0: (opts.tradeD0 !== undefined) ? opts.tradeD0 : TRADE_D0,
       worldPrice: new Float32Array(G),
@@ -276,6 +353,17 @@
       impoTot: new Float32Array(G),
       expoScale: new Float32Array(G),      // 逐商品的出口侧 / 进口侧平账系数
       impoScale: new Float32Array(G),
+
+      // —— 省 ↔ 国的接入层（基建）——
+      infra: new Uint8Array(P),            // 各省的路网/港口等级
+      infraCap: new Float32Array(P),       // 地理允许修到多少（离海近的高、内陆深处低）
+      coastDist: new Float32Array(P),      // 到最近沿海省的商路距离（静态地理，开局算一次）
+      conn: new Float32Array(P),           // 连通度 0..1：这个省离本国市场有多近
+      localPrice: new Float32Array(G * P), // 省价（生产与消费真正用的价）
+      demandP: new Float32Array(G * P),    // 省级需求（算省价用）
+      infraBuild: new Uint8Array(P),       // 在建标志
+      infraLeft: new Uint8Array(P),        // 剩余工期
+      infraDone: 0,
 
       // —— 玩家命令层（预分配环形队列）——
       cmdKind: new Uint8Array(CMD_CAP),
@@ -470,6 +558,15 @@
     w.dist.fill(Infinity);
     w.tradeOpen.fill(1);
     buildTradeDistances(w);
+    /* 基建：天花板由地理算，起点统一给天花板的 30%（不摇随机数 ——
+     * createWorld 里的 rng() 序列一动，初始建筑与禀赋全都会漂，
+     * 现有回归的基线数字就全失效了。这里刻意做成纯确定的地理函数）。 */
+    refreshInfraCaps(w);
+    for (var ip = 0; ip < P; ip++) {
+      var ilv = Math.round(w.infraCap[ip] * INFRA_INIT);
+      w.infra[ip] = ilv < 0 ? 0 : ilv;
+    }
+    refreshConn(w);
     refreshLevelCaps(w);      // 开局先刷一次，之后每 tick 跟随人口
     for (var warm = 0; warm < 3; warm++) tick(w);
     w.warmed = true;   // 预热不再触发灾情：开局不该在第 0 个月就挨一次歉收
@@ -556,6 +653,32 @@
 
     var dist = new Float32Array(P);
     var done = new Uint8Array(P);
+
+    /* —— 到最近海岸的商路距离：顺手在同一张邻接表上再跑一次多源 Dijkstra ——
+     * 为什么要这个量而不是直接用 landFrac：landFrac 的中位数就是 1.000
+     * （大多数省的 Voronoi 胞完全落在陆地上），拿它当"沿海度"等于只给少数几个省发福利，
+     * 基建天花板会全挤在 5.8~8.0 那一小段里。而"离海多远"是个连续量，
+     * 历史上也正是它决定铁路修到哪里 —— 港口 → 内陆 → 腹地。 */
+    dist.fill(Infinity);
+    done.fill(0);
+    for (var s0 = 0; s0 < P; s0++) {
+      var lf0 = map.provinces[s0].landFrac;
+      if (lf0 !== undefined && lf0 < 0.98) dist[s0] = 0;
+    }
+    for (var it0 = 0; it0 < P; it0++) {
+      var b0 = -1, bd0 = Infinity;
+      for (var q0 = 0; q0 < P; q0++) if (!done[q0] && dist[q0] < bd0) { bd0 = dist[q0]; b0 = q0; }
+      if (b0 < 0) break;
+      done[b0] = 1;
+      var base0 = b0 * MAX_NB, n0 = nCount[b0];
+      for (var e0 = 0; e0 < n0; e0++) {
+        var to0 = nIdx[base0 + e0];
+        var nd0 = bd0 + nW[base0 + e0];
+        if (nd0 < dist[to0]) dist[to0] = nd0;
+      }
+    }
+    for (var p0 = 0; p0 < P; p0++) w.coastDist[p0] = (dist[p0] < Infinity) ? dist[p0] : 9999;
+
     for (var c = 0; c < C; c++) {
       dist.fill(Infinity);
       done.fill(0);
@@ -615,6 +738,51 @@
     }
   }
 
+  /* 连通度：基建等级 → 0..1 的饱和函数。
+   * 用 CONN_BASE 兜底而不是从 0 起：一级路都没有的省也不是完全隔绝的
+   * （人背马驮、集市、走亲戚），彻底断绝会让内陆省变成另一个模型。 */
+  function refreshConn(w) {
+    var P = w.P;
+    for (var p = 0; p < P; p++) {
+      var x = CONN_BASE + w.infra[p];
+      w.conn[p] = x / (x + CONN_K);
+    }
+  }
+
+  /* 基建天花板：地理决定的。沿海（landFrac 低 ⇒ 胞内大片是海）和城市化的省
+   * 能修到很密的路网；内陆深处修不动 —— 这和 levelCap 是同一条哲学：
+   * **地理定的是天花板，不是起点**。 */
+  /* 基建天花板 = 基础 + 沿海度 + 城市化。
+   *
+   * 「沿海度」是**离海距离在本图内的分位**，不是距离本身。这一步是量出来的：
+   *   · 用 landFrac 当沿海度 → 中位数就是 1.000，只有少数省吃到，天花板全挤在 5.8~8.0
+   *   · 用 exp(−离海距离/D0) → 地图是紧凑的，绝大多数省都在 200 单位以内，
+   *     exp 几乎不衰减，天花板变成 8.1~17.0 的一段高平台 —— **而 AI 的钱只够修到 12 级**
+   *     于是卡住所有人的不是地理而是钱包，conn 全饱和在 0.733，地理又不起作用了
+   * 病根是「离海距离」的绝对尺度依赖地图大小。取分位就把尺度问题消掉了：
+   * 最靠海的省和最内陆的省之间**一定**有确定的差距，换地图换种子都不变。
+   * 代价是它不再是一个物理量 —— 但天花板本来就是相对的（"这个省比那个省更适合修路"），
+   * 不是绝对的（"它值 7.3 级路"）。 */
+  function refreshInfraCaps(w) {
+    var P = w.P, p;
+    var sorted = new Float32Array(P);
+    for (p = 0; p < P; p++) sorted[p] = w.coastDist[p];
+    Array.prototype.sort.call(sorted, function (a, b) { return a - b; });
+    var n = P;
+    for (p = 0; p < P; p++) {
+      /* 二分找出自己在排序表里的位置 → 分位 */
+      var d = w.coastDist[p], lo = 0, hi = n;
+      while (lo < hi) {
+        var mid = (lo + hi) >> 1;
+        if (sorted[mid] < d) lo = mid + 1; else hi = mid;
+      }
+      var pct = n > 1 ? lo / (n - 1) : 0;      // 0 = 最靠海，1 = 最内陆
+      if (pct > 1) pct = 1;
+      var near = 1 - pct;
+      w.infraCap[p] = INFRA_CAP_BASE + INFRA_CAP_COAST * near + INFRA_CAP_URBAN * w.urban[p];
+    }
+  }
+
   /* ---------------- 事件日志 ---------------- */
 
   function pushEvent(w, text, kind) {
@@ -657,6 +825,7 @@
 
     /* 3) 需求 */
     w.demand.fill(0);
+    w.demandP.fill(0);
     for (p = 0; p < P; p++) {
       c = w.map.provinces[p].country;
       for (s = 0; s < S2; s++) {
@@ -664,7 +833,11 @@
         var wl = w.wealth[s * P + p];
         for (g = 0; g < G2; g++) {
           var mult = Math.max(NEED_FLOOR[g], 1 + (wl - 1) * LUX_SENS[g]);
-          w.demand[g * C + c] += n * NEEDS[s][g] * mult;
+          var qty = n * NEEDS[s][g] * mult;
+          w.demand[g * C + c] += qty;
+          /* 同一个量同时记到省上 —— 省级封闭价要用它。
+           * 一份数据两处累加，而不是事后拆，是为了不引入第二套口径。 */
+          w.demandP[g * P + p] += qty;
         }
       }
     }
@@ -691,7 +864,7 @@
     for (g = 0; g < G2; g++) {
       var ws = Math.max(w.worldSupply[g], 0.001);
       w.worldPrice[g] = GOODS[g].base *
-        clamp(Math.pow(w.worldDemand[g] / ws, PRICE_ELASTIC), 0.28, 3.4);
+        clamp(Math.pow(w.worldDemand[g] / ws, PRICE_ELASTIC), w.priceFloor, w.priceCeil);
     }
 
     /* 可达性用的是上一 tick 的人口（国家统计在第 8 步）。
@@ -704,12 +877,32 @@
         var key2 = g * C + c;
         var sup = Math.max(w.supply[key2], 0.001);
         var dem = w.demand[key2];
-        var pa = GOODS[g].base * clamp(Math.pow(dem / sup, PRICE_ELASTIC), 0.28, 3.4);
+        var pa = GOODS[g].base * clamp(Math.pow(dem / sup, PRICE_ELASTIC), w.priceFloor, w.priceCeil);
         w.autarky[key2] = pa;
         var lam = lam0 * TRADABILITY[g];
         if (lam > 1) lam = 1;
         var target = Math.pow(pa, 1 - lam) * Math.pow(w.worldPrice[g], lam);
         w.price[key2] = w.price[key2] * (1 - PRICE_SMOOTH) + target * PRICE_SMOOTH;
+      }
+    }
+
+    /* 4e) 省价 —— 省 ↔ 国的接入层，和 4c 是同一套写法的下一级。
+     * 省的封闭价按**这个省自己**的供需算，再按连通度 conn 混向国家价。
+     * conn 接近 0 的省就是个自给自足的小世界：产什么吃什么，
+     * 多余的砸在自己手里，缺的贵得离谱。那就是"基建差就是难以贸易"。 */
+    for (p = 0; p < P; p++) {
+      c = w.map.provinces[p].country;
+      var cn = w.conn[p];
+      for (g = 0; g < G2; g++) {
+        var sp = Math.max(w.output[g * P + p], 0.001);
+        var dp = w.demandP[g * P + p];
+        var pp = GOODS[g].base *
+          clamp(Math.pow(dp / sp, PRICE_ELASTIC), w.priceFloor, w.priceCeil);
+        var nat = w.price[g * C + c];
+        if (pp > nat * LOCAL_BAND) pp = nat * LOCAL_BAND;
+        else if (pp < nat / LOCAL_BAND) pp = nat / LOCAL_BAND;
+        if (cn >= 1) w.localPrice[g * P + p] = w.price[g * C + c];
+        else w.localPrice[g * P + p] = Math.pow(pp, 1 - cn) * Math.pow(w.price[g * C + c], cn);
       }
     }
 
@@ -781,8 +974,11 @@
     gdpAcc.fill(0);
     for (p = 0; p < P; p++) {
       c = w.map.provinces[p].country;
+      /* 收入按**省价**结算，不是国家价。
+       * 这就是基建的全部经济意义：路不好的省，东西卖不出国家价。
+       * 生产者和消费者在同一个省时那道差价不发生 —— 和 VIC3 的 MAPI 一模一样。 */
       var revenue = 0;
-      for (g = 0; g < G2; g++) revenue += w.output[g * P + p] * w.price[g * C + c];
+      for (g = 0; g < G2; g++) revenue += w.output[g * P + p] * w.localPrice[g * P + p];
       gdpAcc[c] += revenue;
 
       // 工业化程度 → 收入分配向中上层倾斜
@@ -807,7 +1003,7 @@
         var wl2 = w.wealth[idx];
         for (g = 0; g < G2; g++) {
           var mult2 = Math.max(NEED_FLOOR[g], 1 + (wl2 - 1) * LUX_SENS[g]);
-          expense += n2 * NEEDS[s][g] * mult2 * w.price[g * C + c];
+          expense += n2 * NEEDS[s][g] * mult2 * w.localPrice[g * P + p];
         }
         expense = Math.max(expense, 0.5);
         w.cost[idx] = expense;
@@ -849,6 +1045,20 @@
        * 关键是 geoBonus 参与打分 —— 否则所有省份都会追同一个高价商品，
        * 世界趋同，地图就没有意义了。 */
       w.invest[p] += revenue * INVEST_RATE;
+
+      /* 基建优先于建厂：一条路能让这个省**所有**产业的成交价都往上抬，
+       * 而多建一级厂只影响一种商品、还受天花板管。
+       * 阈值放在 conn < 0.72 而不是"修到顶"：接到 0.72 以后边际收益已经很小，
+       * 钱应该转去建厂（这个数是标定量，见 test/infra-test.js）。 */
+      if (w.autoInvest && !w.infraBuild[p] && w.infra[p] < w.infraCap[p] && w.conn[p] < 0.72) {
+        var icost = infraCost(w.infra[p]);
+        if (w.invest[p] >= icost) {
+          w.invest[p] -= icost;
+          w.infraBuild[p] = 1;
+          w.infraLeft[p] = INFRA_MONTHS;
+          w.treasuryGain[c] += icost * 0.12;
+        }
+      }
       if (w.autoInvest && w.unrest[p] < 0.72 && totalLv < MAX_LEVEL * G2) {
         var costNext = investCost(totalLv);
         if (w.invest[p] >= costNext) {
@@ -913,6 +1123,16 @@
         w.constructionDone++;
       }
     }
+    /* 基建在建工程：与建筑同一条规则（走国库/投资池的钱，工期到了才 +1 级，也受天花板管） */
+    for (p = 0; p < P; p++) {
+      if (!w.infraBuild[p]) continue;
+      if (--w.infraLeft[p] <= 0) {
+        if (w.infra[p] < w.infraCap[p]) w.infra[p]++;
+        w.infraBuild[p] = 0;
+        w.infraDone++;
+      }
+    }
+
     for (c = 0; c < C; c++) {
       if (!w.reliefOn[c]) continue;
       if (w.reliefLeft[c] <= 0) { w.reliefOn[c] = 0; continue; }   // 赈灾承诺到期
@@ -964,6 +1184,8 @@
 
     /* 8.7) 人口变了，地理承载力跟着变 —— 天花板是"地貌"，不是"开局快照" */
     refreshLevelCaps(w);
+    /* 连通度只随基建变，但它便宜，和天花板一起刷，少一个调用点就少一处遗漏 */
+    refreshConn(w);
 
     /* 9) 日历 */
     w.month++;
@@ -1045,6 +1267,23 @@
         }
       } else if (kind === CMD_SET_AUTO) {
         w.autoInvest = w.cmdValue[i] > 0.5;
+      } else if (kind === CMD_INFRA) {
+        if (prov >= 0 && prov < w.P && !w.infraBuild[prov]) {
+          var ilv2 = w.infra[prov];
+          /* 和建造同一条纪律：玩家也受地理天花板管，没有后门 */
+          if (ilv2 < Math.floor(w.infraCap[prov])) {
+            var icost2 = infraCost(ilv2);
+            var ctry2 = w.map.provinces[prov].country;
+            if (w.treasury[ctry2] >= icost2) {
+              w.treasury[ctry2] -= icost2;
+              w.infraBuild[prov] = 1;
+              w.infraLeft[prov] = INFRA_MONTHS;
+            } else {
+              pushEvent(w, w.map.countries[ctry2].name + ' 国库不足，' +
+                w.map.provinces[prov].name + ' 的基建未能开工。', 'info');
+            }
+          }
+        }
       } else if (kind === CMD_TRADE) {
         /* 通商政策。用 cmdCountry 而不是 cmdProv：这是一国的制度，不是一省的工程。 */
         var tc = w.cmdCountry[i];
@@ -1245,6 +1484,26 @@
     out.avgWealth = totalPop > 0 ? totalWealth / totalPop : 0;
     out.unrest = w.unrest[p];
     out.invest = w.invest[p];
+    // —— 省 ↔ 国的接入层 ——
+    out.infra = w.infra[p];
+    out.infraCap = w.infraCap[p];
+    out.conn = w.conn[p];
+    out.infraBuilding = !!w.infraBuild[p];
+    out.infraLeft = w.infraLeft[p];
+    out.infraCost = infraCost(w.infra[p]);
+    var lp = [];
+    for (var lg = 0; lg < w.G; lg++) {
+      lp.push({
+        name: GOODS[lg].name,
+        hue: GOODS[lg].hue,
+        local: w.localPrice[lg * P + p],
+        national: w.price[lg * w.C + w.map.provinces[p].country],
+        world: w.worldPrice[lg],
+        gap: w.price[lg * w.C + w.map.provinces[p].country] > 0
+          ? w.localPrice[lg * P + p] / w.price[lg * w.C + w.map.provinces[p].country] - 1 : 0
+      });
+    }
+    out.localPrices = lp;
     return out;
   }
 
@@ -1265,6 +1524,9 @@
     CMD_RELIEF: CMD_RELIEF,
     CMD_SET_AUTO: CMD_SET_AUTO,
     CMD_TRADE: CMD_TRADE,
+    CMD_INFRA: CMD_INFRA,
+    infraCost: infraCost,
+    INFRA_MONTHS: INFRA_MONTHS,
     BUILD_MONTHS: BUILD_MONTHS,
     RELIEF_COST: RELIEF_COST,
     RELIEF_MONTHS: RELIEF_MONTHS,

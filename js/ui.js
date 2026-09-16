@@ -101,6 +101,8 @@
        * 这样重绘不用去同步按钮的 class，少一处会不同步的地方。 */
       var ob = e.target.closest('[data-open]');
       if (ob && hooks.onTrade) hooks.onTrade(parseFloat(ob.dataset.open));
+      var ib = e.target.closest('#btn-infra');
+      if (ib && hooks.onInfra) hooks.onInfra(boundProvince);
     });
 
     buildMarketRows(world);
@@ -393,12 +395,36 @@
       for (var k = 0; k < 10; k++) {
         pips += '<i class="' + (k < Math.round(b.level / 14 * 10) ? 'on' : '') + '"></i>';
       }
+      /* 省价 / 国价：这一层最该被看见的两个数。
+       * 它们不相等，就是"这个省还没真正进国家市场"的直接证据。 */
+      var lp = d.localPrices[g];
+      var gapCls = lp.gap > 0.06 ? 'bad' : (lp.gap < -0.06 ? 'good' : 'dim');
       html += '<div class="building">' +
         '<span class="bl">' + b.name + '</span>' +
         '<span class="pips">' + pips + '</span>' +
         '<span class="num" style="min-width:auto">' + b.level + ' 级</span>' +
+      '</div>' +
+      '<div class="row" style="margin:-2px 0 4px 0">' +
+        '<span class="sv dim" style="flex:1 1 auto">省价 ' + lp.local.toFixed(1) +
+          ' / 国价 ' + lp.national.toFixed(1) + '</span>' +
+        '<span class="sv ' + gapCls + '">' + (lp.gap >= 0 ? '+' : '') + pct(lp.gap) + '</span>' +
       '</div>';
     }
+
+    // 基建：省 ↔ 国 的接入层
+    var connCls = d.conn > 0.70 ? 'good' : (d.conn > 0.45 ? 'warn' : 'bad');
+    var capLeft = Math.floor(d.infraCap) - d.infra;
+    html += '<div class="section-title">基建</div>' +
+      '<div class="kv"><span>连通度</span><b class="' + connCls + '">' + pct(d.conn) + '</b></div>' +
+      '<div class="kv"><span>路网等级</span><b>' + d.infra + ' / ' + Math.floor(d.infraCap) + '</b></div>' +
+      (d.infraBuilding
+        ? '<button class="abtn wide on" disabled>施工中 · 还需 ' + d.infraLeft + ' 个月</button>'
+        : (capLeft <= 0
+          ? '<button class="abtn wide" disabled>已到地理上限</button>'
+          : '<button class="abtn wide" id="btn-infra">修基建　' + fmtMoney(d.infraCost) + '</button>')) +
+      '<div class="anote">连通度决定这个省能多接近本国市场价。' +
+      '路不好时，本地多余的东西砸在自己手里，缺的东西贵得离谱 ——' +
+      '上面的「省价 / 国价」就是这道差距。</div>';
 
     // 状态
     html += '<div class="section-title">状况</div>' +

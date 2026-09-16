@@ -71,6 +71,14 @@
           onResetView: function () { renderer.resetView(); },
           /* 两个花钱口子。UI 不直接改世界，只把命令塞进 sim 的环形队列，
            * 由下一个 tick 的 applyCommands 消费 —— 和 test/tension.js 走同一条路。 */
+          /* 修基建：和建造走同一条命令队列，只是 kind 不同、付款人一样是国库 */
+          onInfra: function (prov) {
+            if (prov < 0) return;
+            VIC.sim.pushCommand(world, VIC.sim.CMD_INFRA, prov, 0, 0, activeCountry);
+            VIC.sim.applyCommands(world);
+            VIC.ui.showProvince(world, prov);
+            refreshAll(false);
+          },
           onBuild: function (prov, good) {
             VIC.sim.pushCommand(world, VIC.sim.CMD_BUILD, prov, good, 0);
             VIC.ui.updateActions(world);
