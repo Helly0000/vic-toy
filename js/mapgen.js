@@ -376,6 +376,41 @@
     }
     var seedCount = sites.length / 2;
 
+    /* 后半段（胞 → 邻接 → 国家 → 打包）与剧本世界共用同一条流水线。 */
+    return packWorld({
+      W: W, H: H, mask: mask, sites: sites, rng: rng,
+      cellSize: cellSize, baseMin: baseMin, wantCountries: wantCountries,
+      landCount: landCount, ownerHint: null, nameOf: null, countries: null
+    });
+  }
+
+  /* ═══════════ 把「掩码 + 站点」打包成一张地图 ═══════════
+   * 这是地理的**后半段**：站点 → Voronoi 胞 → 陆地统计 → 邻接 → 国家 → 打包。
+   * 前半段（掩码从哪来、站点撒在哪）交给调用方，于是同一条流水线服务两种世界：
+   *   generate()          —— 噪声造大陆 + 抖动网格播种 + BFS 分国   （随机世界）
+   *   VIC.scenario.build  —— 真实地球栅格 + 真实城市坐标 + 真实国界（剧本世界）
+   * 分叉只有三处：国家怎么来、省份叫什么、站点推不推。其余三百行完全共用 ——
+   * 这条纪律很关键：**剧本世界和随机世界不能是两套地理代码**，
+   * 否则"在随机地图上标定的参数"就没有理由适用于剧本，反之亦然。
+   */
+  function packWorld(o) {
+    var W = o.W, H = o.H, mask = o.mask, rng = o.rng;
+    var cellSize = o.cellSize, baseMin = o.baseMin;
+    /* 站点表统一转成普通数组再处理：补种那一步要 **追加**，
+     * 而剧本传进来的是定长的 Float64Array —— 第一次跑就在 sites.push 上崩了。
+     * 站点总量只有几百个，转一次的代价可以忽略。 */
+    var sites = [];
+    for (var si0 = 0; si0 < o.sites.length; si0++) sites.push(o.sites[si0]);
+    var ownerHint = o.ownerHint || null;       // 逐站点的国家号；随机世界为 null
+    var seedCount = sites.length / 2;
+    var jitterScale = (o.jitterScale === undefined) ? 1 : o.jitterScale;
+    var wantCountries = o.wantCountries || 0;  // 只有随机世界分支用得上
+    var landCount = o.landCount;
+    if (landCount === undefined) {              // 剧本世界自己数，随机世界由 generate 传进来
+      landCount = 0;
+      for (var lc0 = 0; lc0 < mask.length; lc0++) if (mask[lc0]) landCount++;
+    }
+
     /* --- 2b. 补种：每一块陆地都必须至少有一个省份 ---
      * 播种是约 47px 间距的抖动网格。一块 180×51 的窄岛，网格点可能一次都不落在上面，
      * 于是那块陆地没有任何 Voronoi 胞覆盖 —— 渲染时露出一块没有省份颜色的深色空地，
@@ -440,7 +475,7 @@
     }
     for (var js = 0; js < seedCount; js++) {
       var ang = rng() * Math.PI * 2;
-      var rad = (0.06 + rng() * 0.40) * baseMin;
+      var rad = (0.06 + rng() * 0.40) * baseMin * jitterScale;
       var nxp = sites[js * 2] + Math.cos(ang) * rad;
       var nyp = sites[js * 2 + 1] + Math.sin(ang) * rad;
       var nxi = nxp | 0, nyi = nyp | 0;
@@ -473,17 +508,49 @@
     var alive = new Uint8Array(seedCount);
     var minLand = cellSize * cellSize * 0.18;
     for (var a = 0; a < seedCount; a++) {
+      /* 剧本世界：站点是手放的真实省会坐标，一个都不该被面积阈值丢掉。
+       * 随机世界仍按"这块胞实际拥有多少陆地"筛。 */
+      if (ownerHint) { alive[a] = 1; continue; }
       var need = forcedSeed[a] ? 1 : minLand;
       alive[a] = seedStats[a].landArea >= need ? 1 : 0;
     }
 
-    /* --- 6. 国家划分：多源 BFS --- */
+    /* --- 6. 国家划分 ---
+     * 两种来源，二选一：
+     *   ownerHint（剧本）—— 国界是**给定的**，来自真实政区栅格，不做 BFS、不做平滑。
+     *     平滑那一步是为了修随机 BFS 的锯齿，套到真实国界上只会帮倒忙。
+     *   否则（随机）—— 多源 BFS 从地理上最分散的国家种子长出来，再平滑。 */
+    var owner = new Int16Array(seedCount).fill(-1);
+    var countries;
+
+    /* 顶点的质心。两条路径都要用（打包时写进 cx/cy），所以在分叉**之前**算 ——
+     * 第一版把它留在 BFS 分支里，剧本世界一跑就在这里 undefined 崩了。 */
     var centroids = new Float64Array(seedCount * 2);
     for (var c2 = 0; c2 < seedCount; c2++) {
       var ct = seedPolys[c2].length >= 6 ? polyCentroid(seedPolys[c2]) : [0, 0];
       centroids[c2 * 2] = ct[0];
       centroids[c2 * 2 + 1] = ct[1];
     }
+
+    if (ownerHint) {
+      for (var oh = 0; oh < seedCount; oh++) owner[oh] = ownerHint[oh];
+      /* 剧本没覆盖到的站点（补种出来的小岛）挂到最近的已归属站点上，
+       * 否则地图上会留下"点了没反应"的无主之地。 */
+      for (var ih = 0; ih < seedCount; ih++) {
+        if (owner[ih] >= 0) continue;
+        var hd = Infinity, ho = 0;
+        for (var ht = 0; ht < seedCount; ht++) {
+          if (owner[ht] < 0) continue;
+          var hx = sites[ih * 2] - sites[ht * 2], hy = sites[ih * 2 + 1] - sites[ht * 2 + 1];
+          var hh = hx * hx + hy * hy;
+          if (hh < hd) { hd = hh; ho = owner[ht]; }
+        }
+        owner[ih] = ho;
+      }
+      countries = o.countries.map(function (d, k) {
+        return { id: k, name: d.name, tag: d.tag, color: d.color, accent: d.accent };
+      });
+    } else {
 
     var cSeeds = [];
     var firstAlive = 0;
@@ -506,7 +573,6 @@
       cSeeds.push(best);
     }
 
-    var owner = new Int16Array(seedCount).fill(-1);
     var frontier = [];
     for (var ci = 0; ci < cSeeds.length; ci++) { owner[cSeeds[ci]] = ci; frontier.push(cSeeds[ci]); }
     while (frontier.length) {
@@ -579,14 +645,17 @@
     for (var rr = 0; rr < seedCount; rr++) if (owner[rr] >= 0) owner[rr] = remap[owner[rr]];
     var C = usedOwners.length;
 
-    var countries = [];
+    countries = [];
     for (var cc = 0; cc < C; cc++) {
       var def = COUNTRY_DEFS[cc % COUNTRY_DEFS.length];
       countries.push({ id: cc, name: def.name, tag: def.tag, color: def.color, accent: def.accent });
     }
+    }   /* ← 结束「随机世界」分支 */
 
     /* --- 7. 打包 --- */
-    var nameGen = makeNameGen(rng);
+    /* 省名：剧本给真名（"鲁尔""关中"），随机世界用名字生成器。
+     * 生成器只在随机路径上构造 —— 它要吃 rng，序列一动全图都漂。 */
+    var nameGen = o.nameOf ? null : makeNameGen(rng);
     var indexOfSeed = new Int32Array(seedCount).fill(-1);
     var provinces = [];
     for (var pp = 0; pp < seedCount; pp++) {
@@ -595,7 +664,7 @@
       provinces.push({
         id: provinces.length,
         seedIndex: pp,
-        name: nameGen(),
+        name: nameGen ? nameGen() : o.nameOf(pp),
         poly: seedPolys[pp],
         cx: centroids[pp * 2],
         cy: centroids[pp * 2 + 1],
@@ -629,10 +698,13 @@
       landCount: landCount,
       seedCount: seedCount
     };
+
   }
+
 
   VIC.mapgen = {
     generate: generate,
+    packWorld: packWorld,
     pointInPoly: pointInPoly,
     polyArea: polyArea,
     polyCentroid: polyCentroid
