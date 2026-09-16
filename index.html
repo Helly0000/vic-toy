@@ -40,6 +40,11 @@
       <div class="stat"><label>国力</label><span id="stat-gdp">—</span></div>
       <div class="stat"><label>不安定</label><span id="stat-unrest">—</span></div>
     </div>
+
+    <div class="tb-far">
+      <label for="scenario" class="scenario-label">世界线</label>
+      <select id="scenario" title="换一张世界线会重新载入"></select>
+    </div>
   </header>
 
   <!-- ══════════ 左侧：省份 / 国家详情 ══════════ -->
@@ -111,6 +116,9 @@
 <script src="js/rng.js"></script>
 <script src="js/mapgen.js"></script>
 <script src="js/sim.js"></script>
+<!-- 剧本数据层：世界即数据。必须在 main.js 之前 —— 它注册 VIC.scenario -->
+<script src="data/scenario.js"></script>
+<script src="data/earth1945.js"></script>
 <script src="js/render.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/main.js"></script>

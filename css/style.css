@@ -535,3 +535,13 @@ html, body {
   cursor: pointer; letter-spacing: 0.05em;
 }
 #verdict-again:hover { background: rgba(216, 180, 106, 0.26); }
+
+/* 世界线选择器：换一张世界线要重新载入，所以它放在顶栏最右，和游戏状态分开放 */
+.tb-far { display: flex; align-items: center; gap: 6px; margin-left: 10px; }
+.scenario-label { font-size: 11px; color: #8a8375; letter-spacing: .08em; }
+#scenario {
+  background: #1b2028; color: #d8cfbc; border: 1px solid #2f3742;
+  border-radius: 3px; padding: 4px 6px; font-size: 12px; font-family: inherit;
+  cursor: pointer; max-width: 190px;
+}
+#scenario:hover { border-color: #4a5563; }

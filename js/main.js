@@ -14,6 +14,52 @@
   var YEARS_PER_RUN = 100; // 一局 = 100 年（1200 tick）。有终点才有「再来一局」。
   var HORIZON = YEARS_PER_RUN * 12;
 
+  /* 世界线的选择：URL 参数 `?w=<剧本 id>`。用参数而不是内存里的开关，
+   * 是因为换世界线要整个重建渲染器 —— 直接 reload 最省事也最不容易留下脏状态。
+   * 不带参数 = 原来的随机世界，所以双击 index.html 的行为完全不变。 */
+  function wantScenario() {
+    var m = /[?&]w=([A-Za-z0-9_]+)/.exec(root.location ? root.location.search : '');
+    return m ? m[1] : '';
+  }
+
+  /* 建图：有剧本就用剧本，没有就照旧噪声生成。
+   * 两条路产出的都是 sim 认识的那张 map，差别只在 provinces 上多了几个字段。 */
+  function buildMap() {
+    var id = wantScenario();
+    var SC = VIC.scenario;
+    if (id && SC && SC.get(id)) {
+      var def = SC.get(id);
+      var map = SC.build(def, { seed: def.seed || SEED });
+      map.scenarioName = def.name;
+      map.intro = def.intro;
+      return map;
+    }
+    if (id && SC) console.warn('找不到剧本「' + id + '」，回退到随机世界');
+    return VIC.mapgen.generate({
+      width: 1600, height: 1000, seed: SEED, provinces: 260, countries: 8
+    });
+  }
+
+  /* 顶栏的世界线下拉：列出"随机世界" + 所有已注册剧本 */
+  function bindScenarioSelect() {
+    var sel = document.getElementById('scenario');
+    if (!sel) return;
+    var cur = wantScenario();
+    var html = '<option value="">随机世界 · seed ' + SEED + '</option>';
+    var list = (VIC.scenario && VIC.scenario.list) ? VIC.scenario.list() : [];
+    for (var i = 0; i < list.length; i++) {
+      var d = VIC.scenario.get(list[i]);
+      html += '<option value="' + list[i] + '">' + (d.name || list[i]) + '</option>';
+    }
+    sel.innerHTML = html;
+    sel.value = cur;
+    sel.addEventListener('change', function () {
+      var v = sel.value;
+      var base = location.href.split('?')[0];
+      location.href = v ? (base + '?w=' + encodeURIComponent(v)) : base;
+    });
+  }
+
   var world = null, renderer = null;
   var speed = 1;
   var acc = 0, lastT = 0;
@@ -31,10 +77,13 @@
     requestAnimationFrame(function () {
       setTimeout(function () {
         var t0 = performance.now();
-        var map = VIC.mapgen.generate({
-          width: 1600, height: 1000, seed: SEED, provinces: 260, countries: 8
+        bindScenarioSelect();
+        var map = buildMap();
+        world = VIC.sim.createWorld(map, {
+          seed: SEED + 7,
+          startYear: map.year,          // 剧本自带起始年（1945）；随机世界仍是 1836
+          intro: map.intro
         });
-        world = VIC.sim.createWorld(map, { seed: SEED + 7 });
 
         // 默认选中人口最多的国家
         var best = 0;

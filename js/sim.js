@@ -279,7 +279,7 @@
       G: G,
       S: S,
       tick: 0,
-      year: 1836,
+      year: opts.startYear === undefined ? 1836 : opts.startYear,
       month: 0,
 
       // —— SoA 状态 ——
@@ -399,9 +399,26 @@
 
     };
 
-    /* —— 地理禀赋：用质心采样噪声，让相邻省份相似 → 形成专业化地带 —— */
+    /* ═══════════ 世界接口：剧本数据优先 ═══════════
+     * 四条禀赋通道有**两个来源**，逐省判定，互不干扰：
+     *   随机世界 —— 下面这段用质心采样噪声，让相邻省份相似 → 形成专业化地带
+     *   剧本世界 —— data/scenario.js 已把真实要素（人均耕地/森林/矿产/工业）
+     *               压缩好挂在 map.provinces[p].fert 等字段上
+     * 为什么敢在这里分叉：`geoBonus` 与 `levelCap` 全都由这四条通道派生，
+     * 于是"接真实资源"不需要在模拟层写一行新机制 —— 换掉原料，产物自己就变了。
+     *
+     * 关键细节：R.fbm 不消耗 rng（噪声表在 makeNoise 时就抽完了），
+     * 所以"跳过 fbm 改读字段"**不会让 rng() 序列漂移**。这是剧本世界能复用
+     * 随机世界全部标定常数的前提 —— 也是本文件里唯一允许出现 if 的地方。 */
     for (var p = 0; p < P; p++) {
       var prov = map.provinces[p];
+      if (prov.fert !== undefined) {
+        w.fert[p] = clamp(prov.fert, 0.05, 4);
+        w.timber[p] = clamp(prov.timber, 0.05, 4);
+        w.mineral[p] = clamp(prov.mineral, 0.05, 4);
+        w.urban[p] = clamp(prov.urban, 0.05, 4);
+        continue;
+      }
       var u = prov.cx / map.width, v = prov.cy / map.height;
       w.fert[p] = clamp(R.fbm(nFert, u * 3.4, v * 3.4, 3, 2, 0.5) * 1.7 - 0.25, 0.25, 1.9);
       w.timber[p] = clamp(R.fbm(nWood, u * 4.1 + 11, v * 4.1 + 7, 3, 2, 0.5) * 1.7 - 0.25, 0.25, 1.9);
@@ -425,9 +442,15 @@
 
     for (var p2 = 0; p2 < P; p2++) {
       var prov2 = map.provinces[p2];
-      var density = w.urban[p2] * 0.85 + 0.35;
-      var total = (prov2.area / avgArea) * density * 165000;
-      total = clamp(total, 28000, 620000);
+      /* 剧本世界直接给人口。真实人口分布和土地面积几乎无关 ——
+       * 加拿大比中国大，人口是它的四十五分之一；按面积摊就全错了。 */
+      var total;
+      if (prov2.pop0 !== undefined) {
+        total = prov2.pop0;
+      } else {
+        var density = w.urban[p2] * 0.85 + 0.35;
+        total = clamp((prov2.area / avgArea) * density * 165000, 28000, 620000);
+      }
       var lower = total * STRATA[0].share;
       var mid = total * STRATA[1].share;
       var up = total * STRATA[2].share;
@@ -573,13 +596,13 @@
 
 
 
-    w.year = 1836;
+    w.year = opts.startYear === undefined ? 1836 : opts.startYear;
     w.month = 0;
     w.tick = 0;
     w.events.length = 0;
     w.gdpPrev.set(w.gdp);
     w.gdpSmooth.set(w.gdp);
-    pushEvent(w, '王国纪年 1836 年，欧洲列强的账本翻开了新的一页。', 'info');
+    pushEvent(w, opts.intro || ('王国纪年 ' + w.year + ' 年，欧洲列强的账本翻开了新的一页。'), 'info');
 
     return w;
   }
