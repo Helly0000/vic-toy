@@ -101,6 +101,13 @@
        * 这样重绘不用去同步按钮的 class，少一处会不同步的地方。 */
       var ob = e.target.closest('[data-open]');
       if (ob && hooks.onTrade) hooks.onTrade(parseFloat(ob.dataset.open));
+      /* 阵营 / 禁运：一次改「对一整个阵营」的关系。
+       * 按钮带 data-blocrel（阵营序号）与 data-rel（目标关系值），
+       * 于是加一档不用改 JS，改 HTML 就行。 */
+      var bb = e.target.closest('[data-blocrel]');
+      if (bb && hooks.onBloc) {
+        hooks.onBloc(parseInt(bb.dataset.blocrel, 10), parseFloat(bb.dataset.rel));
+      }
       var ib = e.target.closest('#btn-infra');
       if (ib && hooks.onInfra) hooks.onInfra(boundProvince);
     });
@@ -349,6 +356,44 @@
       '<button class="abtn" data-open="0">闭关</button></div>' +
       '<div class="anote">当前：<b>' + openLabel + '</b>（开放度 ' + pct(open) + '）。</div>' +
       '<div class="anote">' + flowLine + '</div>';
+
+    /* 阵营与禁运。
+     * ⚠ 它和上面那段通商是**两个不同的动词**，面板必须说清楚，否则玩家会以为是同一件事：
+     *     通商 = 我对自己开多大的门（tradeOpen，单方面的，只影响我怎么定价）
+     *     禁运 = 我允许谁跟我做生意（relation，**双向**的，也决定对方的处境）
+     * 关系实际生效的是 relEff = min(两边)，所以单方面宣布就有效 —— 面板上显示的就是生效值，
+     * 不是本国声明的那个数。这一点不写清楚，玩家会以为按钮没反应。 */
+    var blocHtml = '<div class="section-title">阵营与禁运</div>';
+    if (!world.map.blocIds || !world.map.blocIds.length) {
+      blocHtml += '<div class="anote">这个剧本没有声明阵营，因此没有可封锁的对象。</div>';
+    } else {
+      var myBloc = (world.map.blocOf && world.map.blocOf[countryId] >= 0)
+        ? world.map.blocIds[world.map.blocOf[countryId]] : null;
+      /* 先说清楚「禁运也是双向的」—— 这是玩家最容易误解的一处：
+       * 他对别人禁运，自己也失去了那个市场。 */
+      blocHtml += '<div class="anote">本国属于 <b>' + (myBloc ? myBloc.name : '无阵营') +
+        '</b>。同阵营之间恒为正常通商。<br>' +
+        '下面是<b>对每一个阵营</b>的关系。注意通商要双方同意，' +
+        '所以你对别人宣布禁运，你自己也失去了那个市场 —— 谁疼得更多取决于双方的大小。</div>';
+      for (var bi = 0; bi < world.map.blocIds.length; bi++) {
+        var sum = 0, n = 0;
+        for (var pc2 = 0; pc2 < world.C; pc2++) {
+          if (pc2 === countryId) continue;
+          if (world.map.blocOf[pc2] !== bi) continue;
+          sum += SIM.relEff(world, countryId, pc2); n++;
+        }
+        if (!n) continue;
+        var avg = sum / n;
+        var lbl = avg > 0.85 ? '通商' : (avg > 0.35 ? '限制' : '禁运');
+        blocHtml += '<div class="kv"><span>' + world.map.blocIds[bi].name + '（' + n + ' 国）</span><b>' +
+          pct(avg) + '　' + lbl + '</b></div>' +
+          '<div class="row" style="gap:6px">' +
+          '<button class="abtn" data-blocrel="' + bi + '" data-rel="1">通商</button>' +
+          '<button class="abtn" data-blocrel="' + bi + '" data-rel="0.5">限制</button>' +
+          '<button class="abtn" data-blocrel="' + bi + '" data-rel="0">禁运</button></div>';
+      }
+    }
+    html += blocHtml;
 
     el.selName.textContent = c.name;
     el.selSub.innerHTML = '<span class="tagpill">' + c.tag + '</span>';

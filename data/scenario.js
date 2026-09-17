@@ -30,6 +30,8 @@
  *   countries[]          { tag, name, color?, accent?, factors{ farm,oil,mine,wood,ind } }
  *   provinces[]          { n: 省名, c: 国家 tag, lat, lon, p: 人口(百万), t?: 要素倾斜 }
  *   eras                 { 1973: { tag: {farm,oil,...} } } —— 时代解锁用的另一张资源表
+ *   blocs                { ID: { name, members: [tag…] } } —— 阵营（省略 = 没有阵营）
+ *   blocRelation         [ [ID, ID, 0..1] … ] —— 阵营之间的关系，1 = 正常通商，0 = 全面禁运
  *   latTop/latBottom     字符画覆盖的纬度范围（默认 84N ~ 61S）
  *
  * 坐标约定
@@ -271,6 +273,18 @@
 
   /* 返回**问题列表**（空数组 = 通过）。不抛异常 —— 校验器要能一次报出所有毛病，
    * 而不是让作者修一个跑一次。 */
+  /* 阵营声明 → 一张 tag → blocId 的表。校验与 build 共用，避免两处口径。 */
+  function blocMap(def) {
+    var out = {};
+    var blocs = def.blocs;
+    if (!blocs) return out;
+    Object.keys(blocs).forEach(function (id) {
+      var m = (blocs[id] && blocs[id].members) || [];
+      for (var i = 0; i < m.length; i++) out[m[i]] = id;
+    });
+    return out;
+  }
+
   function validate(def) {
     var bad = [];
     var need = function (cond, msg) { if (!cond) bad.push(msg); };
@@ -357,8 +371,72 @@
     return def.grid[r].charAt(c);
   }
 
+  /* 阵营校验单独一遍，理由是它**不属于 grid** —— grid 那一段验的是字符画，
+   * 这里验的是「谁和谁一伙」。混在一起会让错误信息指错地方。 */
+  function validateBlocs(def) {
+    var bad = [];
+    var blocs = def.blocs;
+    if (!blocs) return bad;
+    var tagSet = {};
+    (def.countries || []).forEach(function (c) { tagSet[c.tag] = 1; });
+
+    var owner = {};
+    Object.keys(blocs).forEach(function (id) {
+      var b = blocs[id];
+      if (!b || typeof b !== 'object') { bad.push('阵营「' + id + '」不是一个对象'); return; }
+      var m = b.members;
+      if (!m || !m.length) { bad.push('阵营「' + id + '」没有成员'); return; }
+      for (var i = 0; i < m.length; i++) {
+        if (!tagSet[m[i]]) bad.push('阵营「' + id + '」的成员「' + m[i] + '」不在 countries 里');
+        else if (owner[m[i]]) bad.push('国家「' + m[i] + '」同时属于阵营「' + owner[m[i]] + '」和「' + id + '」');
+        else owner[m[i]] = id;
+      }
+    });
+
+    var seenPair = {};
+    (def.blocRelation || []).forEach(function (row, i) {
+      if (!row || row.length !== 3) { bad.push('blocRelation 第 ' + i + ' 项不是 [ID, ID, 值]'); return; }
+      var a = row[0], b = row[1], v = row[2];
+      if (!blocs[a]) bad.push('blocRelation 第 ' + i + ' 项引用了不存在的阵营「' + a + '」');
+      if (!blocs[b]) bad.push('blocRelation 第 ' + i + ' 项引用了不存在的阵营「' + b + '」');
+      if (a === b) bad.push('blocRelation 第 ' + i + ' 项两端都是「' + a + '」—— 同阵营内部关系恒为 1');
+      if (!(typeof v === 'number' && isFinite(v) && v >= 0 && v <= 1)) {
+        bad.push('blocRelation「' + a + '↔' + b + '」的值 ' + v + ' 不在 0..1');
+      }
+      var key = a < b ? a + '|' + b : b + '|' + a;
+      if (seenPair[key]) bad.push('blocRelation 里「' + a + '↔' + b + '」声明了不止一次');
+      seenPair[key] = 1;
+    });
+    return bad;
+  }
+
+  /* 阵营两两之间的关系矩阵（对称）。未声明的组合取 1.0 ——
+   * 于是「不写 blocs」与「写了但关系全 1」在模型里是同一件事。 */
+  function blocMatrix(tags, owner, rel) {
+    var C = tags.length;
+    var m = new Float32Array(C * C);
+    m.fill(1);
+    var pair = {};
+    (rel || []).forEach(function (row) {
+      if (!row || row.length !== 3) return;
+      var key = row[0] < row[1] ? row[0] + '|' + row[1] : row[1] + '|' + row[0];
+      pair[key] = row[2];
+    });
+    for (var a = 0; a < C; a++) {
+      for (var b = 0; b < C; b++) {
+        if (a === b) continue;
+        var ba = owner[tags[a]], bb = owner[tags[b]];
+        if (!ba || !bb || ba === bb) continue;      // 同阵营 / 无阵营 ⇒ 1.0
+        var k = ba < bb ? ba + '|' + bb : bb + '|' + ba;
+        if (pair[k] !== undefined) m[a * C + b] = pair[k];
+      }
+    }
+    return m;
+  }
+
   function define(def) {
     var bad = validate(def);
+    bad = bad.concat(validateBlocs(def));      // 两遍分开查，错误信息才指得准地方
     if (bad.length) {
       var e = new Error('剧本「' + (def && def.id) + '」有 ' + bad.length + ' 处问题：\n  ' +
         bad.slice(0, 24).join('\n  ') + (bad.length > 24 ? '\n  …还有 ' + (bad.length - 24) + ' 处' : ''));
@@ -483,6 +561,25 @@
      * 剧本不声明就用 sim 的默认值 —— 随机世界因此一位都不动。 */
     if (def.scaleLo !== undefined) map.scaleLo = def.scaleLo;
     if (def.scaleHi !== undefined) map.scaleHi = def.scaleHi;
+
+    /* —— 阵营：剧本声明 → 一张 C×C 的初始关系矩阵 ——
+     * 放在 map 上而不是直接写进 world，理由和 scaleLo 一样：
+     * 剧本给的是**世界的初始设定**，world 决定要不要采纳（sim 那边有兜底）。
+     * 随机世界没有 blocOf，于是它一位都不动。 */
+    var blocTags = def.countries.map(function (cd) { return cd.tag; });
+    var blocOwner = blocMap(def);
+    map.blocOf = new Int8Array(blocTags.length);
+    map.blocIds = [];
+    var blocIdx = {};
+    Object.keys(def.blocs || {}).forEach(function (id) {
+      blocIdx[id] = map.blocIds.length;
+      map.blocIds.push({ id: id, name: (def.blocs[id] && def.blocs[id].name) || id });
+    });
+    for (var bt = 0; bt < blocTags.length; bt++) {
+      var bo = blocOwner[blocTags[bt]];
+      map.blocOf[bt] = (bo === undefined) ? -1 : blocIdx[bo];
+    }
+    map.relation0 = blocMatrix(blocTags, blocOwner, def.blocRelation);
 
     /* —— 5. 禀赋与人口：数据 → 四条通道 —— */
     attachEndowments(map, def, provs, tagToIdx, opts);
@@ -638,6 +735,9 @@
     register: function (def) { return define(def); },   // define 的别名，读起来更顺
     ENDOW: ENDOW,
     _cellOf: cellOf,
+    _blocMap: blocMap,
+    _blocMatrix: blocMatrix,
+    _validateBlocs: validateBlocs,
     _sampleSoft: sampleSoft,
     _despeckle: despeckle,
     _regs: SCENARIOS

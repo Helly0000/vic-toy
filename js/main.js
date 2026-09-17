@@ -154,6 +154,29 @@
             refreshAll(false);
           },
 
+          /* 阵营 / 禁运：一次改动**对一整个阵营**的关系。
+           * 为什么不给每个国家一个按钮：29 个国家在侧栏里排不下，
+           * 而且真正有意义的决策单位本来就是「对整个阵营」。
+           * 逐个国家的精细操作仍然可用 —— 走 pushCommand，只是 UI 暂时只给粗档。
+           *
+           * 每个国家一条命令（29 条 < CMD_CAP 256），入队后立刻消费一次，
+           * 让按钮即时反映到面板上（和赈灾/通商同一个套路，没有绕过后门）。 */
+          onBloc: function (blocIndex, rel) {
+            var map = world.map;
+            if (!map.blocIds || !map.blocIds[blocIndex]) return;
+            var sent = 0;
+            for (var c = 0; c < world.C; c++) {
+              if (c === activeCountry) continue;
+              if (map.blocOf[c] !== blocIndex) continue;
+              VIC.sim.pushCommand(world, VIC.sim.CMD_BLOC, c, 0, rel, activeCountry);
+              sent++;
+            }
+            if (!sent) return;
+            VIC.sim.applyCommands(world);
+            VIC.ui.showCountryOverview(world, activeCountry);
+            refreshAll(false);
+          },
+
           onRestart: function () { location.reload(); }
         });
 

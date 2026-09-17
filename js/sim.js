@@ -98,6 +98,7 @@
   var CMD_WAGE = 6;       // 工资政策：country + value = 0..1（0 = 市场分配，1 = 向底层倾斜）
   var CMD_EDU = 7;        // 教育投入：country + value = 0..1（0 = 不办教育，1 = 全力普及）
   var CMD_FOOD = 8;       // 粮食政策：country + value = 0..1（1 = 全力补贴乡村口粮）
+  var CMD_BLOC = 9;       // 阵营关系：country = 本国，prov = 对方国，value = 关系 0..1
 
   /* country 是给「一国的制度」用的（赈灾、通商政策）。
    * 建造不需要它 —— 省份已经隐含了国家。
@@ -289,6 +290,12 @@
 
   var TRADE_LAMBDA = 1.30;               // 运输技术：把「可达份额」放大成整合度的总闸（标定台 test/trade-sweep.js）
   var TRADE_D0 = 260;                    // 引力衰减尺度（地图坐标；地图宽 1600）
+  /* ══ 阵营 / 封锁（2026-09-11）══
+   * rel[c][o] ∈ [0,1]：1 = 正常通商，0 = 全面禁运。矩阵**对称**使用（见 relEff）。
+   * 它只从**一个**地方进入模型：可达性里每个伙伴的权重（见 refreshAccess）。
+   * 为什么不另开一条贸易通道：价格已经通过 λ 把「能不能卖给外面」算进去了，
+   * 再按流量算一遍就是重复计提 —— 和 4d 那条长注释同一个理由。 */
+  var BLOC_OPEN = 1.0;                   // 默认关系：全开放
   var SEA_COST = 1.30;                   // 跨海边的距离倍率
   /* 各商品的贸易品程度。谷物最好运（人也得吃饭），奢侈品最不好运
    * （高价值低重量，但需求高度本地化、且是身份消费）。
@@ -382,6 +389,11 @@
       access: new Float32Array(C),         // 地理可达性 0..1
       tradeOpen: new Float32Array(C),      // 政策开放度 0..1（玩家可改）
       tradeWeight: new Float32Array(C),    // λ：市场整合度（每 tick 现算）
+      /* 阵营关系矩阵 rel[c][o]。**对称使用**（relEff 取较小的一边），
+       * 但存储上两边都写 —— 于是读它的人不需要知道该读哪一边。
+       * 默认 BLOC_OPEN = 1 时它对模型的影响**恰好为零**，
+       * 这一条是 test/bloc-test.js 的 P1（逐字节等价），不是口头保证。 */
+      relation: new Float32Array(C * C),
 
       /* ══ 意识形态驱动 v1（2026-09-11）══
        * 两个**独立于主梯度**的驱动，给"阶级冲突"与"永久后果"提供落点。
@@ -706,6 +718,11 @@
      * 初始价 = 基准价，但预热会把世界价与各国价一起推到有差异的位置。 */
     w.dist.fill(Infinity);
     w.tradeOpen.fill(1);
+    /* 阵营关系：剧本可以在 map 上带一张初始矩阵（map.relation0）。
+     * 没有就保持全开放 —— 随机世界因此一位都不动（已用 sha1 逐字节验证过）。
+     * 和 scaleLo 一样：map 给的是**设定**，world 决定采不采纳。 */
+    w.relation.fill(BLOC_OPEN);
+    if (map.relation0 && map.relation0.length === C * C) w.relation.set(map.relation0);
     buildTradeDistances(w);
     /* 基建：天花板由地理算，起点统一给天花板的 30%（不摇随机数 ——
      * createWorld 里的 rng() 序列一动，初始建筑与禀赋全都会漂，
@@ -867,6 +884,15 @@
    * 不是「谁今年景气」。
    *
    * 每 tick 重算：C² = 64 次乘加，比一次开方还便宜。 */
+  /* 双向关系取**较小**的一边：通商要双方都同意。
+   * 于是「单方面宣布禁运」的效果会**自动**落到两边头上 —— 而这正是对的：
+   * 被禁运的一方确实失去了这个伙伴。谁疼得更多不由矩阵决定，由人口权重决定
+   * （古巴对美国微不足道，美国对古巴是致命的）。 */
+  function relEff(w, a, b) {
+    var x = w.relation[a * w.C + b], y = w.relation[b * w.C + a];
+    return x < y ? x : y;
+  }
+
   function refreshAccess(w) {
     var C = w.C;
     var totalPop = 0;
@@ -880,7 +906,11 @@
         if (o === c2) continue;
         var d = w.dist[c2 * C + o];
         if (!(d < Infinity)) continue;             // 没有陆路/海路相通
-        reach += (w.popTotal[o] / others) * Math.exp(-d / w.tradeD0);
+        /* 关系乘在**伙伴权重**上，不动分母 others。
+         * 分母保持「不受限制的他国总人口」是刻意的：禁运的语义是
+         * **你能触达的世界市场变小了**，而不是「换个人做生意就补回来了」。
+         * 若把禁运掉的伙伴从分母里剔掉，禁运就等于一个纯粹的无操作。 */
+        reach += (w.popTotal[o] / others) * Math.exp(-d / w.tradeD0) * relEff(w, c2, o);
       }
       w.access[c2] = reach;
       w.tradeWeight[c2] = w.tradeLambda * w.tradeOpen[c2] * reach;
@@ -1565,6 +1595,21 @@
           if (fv > 1) fv = 1;
           w.foodPolicy[fc] = fv;
         }
+      } else if (kind === CMD_BLOC) {
+        /* 阵营关系。这一条**不是**「一国的制度」，所以两个国家都从命令里取：
+         *   country = 本国（谁在宣布），prov = 对方国（对谁宣布）
+         * 用 prov 装对方国是刻意的 —— 命令队列里 prov 是通用的第二个整数参数，
+         * 语义由 kind 决定（CMD_INFRA 拿它装省份）。不加新的队列字段，
+         * 也就不会有「新字段忘了初始化」这类静默失败。
+         * 写的时候两边一起写：唯一的真相只有一条，读的人不必挑边。 */
+        var bc = w.cmdCountry[i], bo = w.cmdProv[i];
+        if (bc >= 0 && bc < w.C && bo >= 0 && bo < w.C && bc !== bo) {
+          var bv = w.cmdValue[i];
+          if (bv < 0) bv = 0;
+          if (bv > 1) bv = 1;
+          w.relation[bc * w.C + bo] = bv;
+          w.relation[bo * w.C + bc] = bv;
+        }
       }
       w.cmdHead = (w.cmdHead + 1) % CMD_CAP;
     }
@@ -1686,10 +1731,33 @@
         tradeWeight: w.tradeWeight[c],
         tradeBalance: w.tradeBalance[c],
         tradeGross: w.tradeGross[c],
-        tariffPaid: w.tariffPaid[c]
+        tariffPaid: w.tariffPaid[c],
+        // —— 阵营 ——
+        bloc: (w.map.blocOf && w.map.blocOf[c] >= 0 && w.map.blocIds)
+          ? w.map.blocIds[w.map.blocOf[c]].name : null
       });
     }
     rows.sort(function (a, b) { return b.gdp - a.gdp; });
+    return rows;
+  }
+
+  /* 本国对每一个伙伴的关系。读的是 relEff（双向取小），因为那才是**实际生效**的值 ——
+   * 面板上显示单边声明值会让玩家以为禁运没生效（他声明了 0.1，可对方没同意，
+   * 实际仍然是 1.0 的那一边……反过来说：只要有一边写了 0.1，实际就是 0.1）。
+   * 与 marketRows 同形：国家 → 一组行。 */
+  function relationsOf(w, countryId) {
+    var rows = [];
+    for (var o = 0; o < w.C; o++) {
+      if (o === countryId) continue;
+      rows.push({
+        id: o,
+        tag: w.map.countries[o].tag,
+        name: w.map.countries[o].name,
+        color: w.map.countries[o].color,
+        rel: relEff(w, countryId, o),
+        pop: w.popTotal[o]
+      });
+    }
     return rows;
   }
 
@@ -1787,6 +1855,7 @@
     createWorld: createWorld,
     tick: tick,
     countryRows: countryRows,
+    relationsOf: relationsOf,
     marketRows: marketRows,
     provinceRows: provinceRows,
     pushCommand: pushCommand,
@@ -1800,6 +1869,9 @@
     CMD_WAGE: CMD_WAGE,
     CMD_EDU: CMD_EDU,
     CMD_FOOD: CMD_FOOD,
+    CMD_BLOC: CMD_BLOC,
+    BLOC_OPEN: BLOC_OPEN,
+    relEff: relEff,
     BASKET_RURAL: BASKET_RURAL,
     BASKET_URBAN: BASKET_URBAN,
     FOOD_SUBSIDY: FOOD_SUBSIDY,
