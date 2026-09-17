@@ -117,11 +117,13 @@ var SETS = [
 ];
 
 var best = null;
+var failed = [];
 SETS.forEach(function (set) {
   SENS = set.s;
   var M = matrix(1945);
   var checks = assertions(M);
   var pass = checks.filter(function (x) { return x[1]; }).length;
+  checks.forEach(function (k) { if (!k[1]) failed.push(set.name + ' → ' + k[0]); });
 
   var all = [];
   M.forEach(function (r) { r.forEach(function (v) { all.push(v); }); });
@@ -169,3 +171,21 @@ GKEYS.forEach(function (k, g) {
 });
 console.log('\n  注：石油目前只在 1973 的数据表里，还没进配方。要让"石油武器"成立，');
 console.log('      下一步是把石油接进「工具/奢侈品」的工业侧——那是 1973 年真正卡脖子的地方。');
+
+/* ── 失败即非零退出 ──
+ * 此前本台只打印 ✗ 而从不设置退出码，于是 6 条史实断言错了 4 条也返回 0，
+ * 任何 `&&` 链 / CI / "改完跑一下标定台"的纪律都会以为它通过了（静默失败）。
+ * 见 README:957 —— 本台是承重标定台，静默通过比红更危险。
+ */
+if (best.pass < 6) {
+  console.log('\n══════ 失败：史实断言 ' + best.pass + '/6（最佳配置 ' + best.set.name + '）══════');
+  failed.forEach(function (f) { console.log('  ✗ ' + f); });
+  console.log('\n  这 6 条断言是"要素→商品自给率"映射的史实护栏。');
+  console.log('  实测范围被夹在 0.35~2.50（见上方"范围"），多国并列在 2.50 桩上，');
+  console.log('  排名退化 —— 即文档反复警告的"饱和函数把差异压平"（坑 #19 / #21）。');
+  console.log('  修法方向：换掉 MAX_MULT/MIN_MULT 的线性夹取（资源侧是重尾量，应走对数/分位数归一），');
+  console.log('  而不是把 MAX_MULT 调大——并重新标定。');
+  process.exitCode = 1;
+} else {
+  console.log('\n══════ 全部通过：史实断言 6/6 ══════');
+}

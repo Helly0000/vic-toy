@@ -95,6 +95,9 @@
   var CMD_SET_AUTO = 3;
   var CMD_TRADE = 4;      // 通商政策：value = 开放度 0..1（0 = 闭关，1 = 自由贸易）
   var CMD_INFRA = 5;      // 修基建：prov = 省份
+  var CMD_WAGE = 6;       // 工资政策：country + value = 0..1（0 = 市场分配，1 = 向底层倾斜）
+  var CMD_EDU = 7;        // 教育投入：country + value = 0..1（0 = 不办教育，1 = 全力普及）
+  var CMD_FOOD = 8;       // 粮食政策：country + value = 0..1（1 = 全力补贴乡村口粮）
 
   /* country 是给「一国的制度」用的（赈灾、通商政策）。
    * 建造不需要它 —— 省份已经隐含了国家。
@@ -125,6 +128,49 @@
   /* 收入分配。这三个数≈各阶层的消费价值占比（0.693 / 0.224 / 0.083），
    * 因此开局各阶层大致收支相抵；上层略占便宜，才有盈余去投资。 */
   var WAGE_BASE = [0.680, 0.230, 0.090];
+
+  /* 工资政策能从上层的份额里划多少给底层（wagePolicy=1 时的比例）。
+   * 0.30 是量出来的起点：够大到让"分配"成为一个真决策，又不至于一击摧毁投资。
+   * 改动前先跑 test/ideo-dof.js（新驱动闸门）与 test/tension.js（张力不许塌）。 */
+  var WAGE_LABOR_SHIFT = 0.30;
+
+  /* 不满的硬上界（补的，见 tick 里的说明）。取 0.80 = floor 的夹取上限 =
+   * 自然演化的历史最大值，所以对既有行为零影响；它挡的是"从外部推上去"的值。
+   * 也保证生产折扣 eff = 1 - 0.55 × unrest 恒为正（0.80 时 = 0.56）。 */
+  var UNREST_CAP = 0.80;
+
+  /* ══ 识字率（2026-09-11）══
+   * 它是一个**新状态变量**，不是从财富/城市化派生出来的读数 —— 这一点是设计前提，
+   * 不是实现细节：事前探针（已删）量到，如果识字率只由城市化决定，
+   * 那么 r(识字率, 城市化) = **1.000**、R² = **1.000**，即它一根轴都加不了。
+   *
+   * 时间尺度取"一代人"：收敛率 0.0006/tick ⇒ 半衰期约 1150 tick（约 95 年）。
+   * 所以 100 年的一局里，识字率是**跑不到顶**的 —— 教育是留给下一局/长线的投资。
+   * 这与灾情那种"当月就见血"的冲击形成对照，也是它作为独立轴的来源。 */
+  var LIT_RATE = 0.0006;        // 向目标收敛的速率（慢 = 有记忆）
+  var LIT_BASE = 0.12;          // 不办教育时的识字率地板
+  var LIT_EDU_K = 0.55;         // 教育投入的满额贡献
+  var LIT_URBAN_W = 0.25;       // 城市化的弱基底（刻意弱：强了就变成城市化换皮）
+  var LIT_MAX = 1.30;
+  /* 识字率的生产加成。只乘在**效率**上，且刻意取小：它要能兑现成一个真实回报，
+   * 但不能大到让经济标定（BASE_LEVEL/WAGE_BASE 那条"开局产出 ≈ 消费"）失效。 */
+  var LIT_PROD = (typeof process !== 'undefined' && process.env && process.env.VIC_LIT_PROD !== undefined)
+    ? parseFloat(process.env.VIC_LIT_PROD) : 0.25;
+
+  /* ══ 城乡分化（第二次尝试，2026-09-11）══
+   * 两套篮子的**平均**必须恰是原来的 NEEDS[0] = [0.55, 0.20, 0.15, 0.07, 0.03]，
+   * 且必须**逐省**成立（`urbanRatio` 逐省不同）—— 这是"开局标定不动"的全部依据。
+   * 改这两个数组前先验算：逐项 (RURAL+URBAN)/2 == NEEDS[0]。 */
+  var BASKET_RURAL = [0.66, 0.14, 0.12, 0.05, 0.03];   // 乡村：偏口粮
+  var BASKET_URBAN = [0.44, 0.26, 0.18, 0.09, 0.03];   // 城市：偏制成品
+  var FOOD_SUBSIDY = 0.35;      // 粮食政策满档时对乡村口粮的折扣
+  /* 两个群体财富的漂移率。用**乘性**（与人口增长同形），不用 s 阶层的加性 ——
+   * 加性下 Δ 是常数、比值会线性发散（上次实测跑到 0.31~1.28）。 */
+  var LOWER_DRIFT = 0.055;
+
+  /* 怨愤（疤痕）的三个常量曾在此，2026-09-11 随机制一起撤销。
+   * 保留说明而不是留空：撤销的理由是"永久后果已由现有地板提供"，
+   * 判据在 test/resent-test.js（它现在会如实报出"残余不可测"）。 */
   var MAX_LEVEL = 14;
   var TAX_RATE = 0.08;
   var INVEST_RATE = 0.06;     // 每 tick 拿多少比例的收入去投资
@@ -336,6 +382,64 @@
       access: new Float32Array(C),         // 地理可达性 0..1
       tradeOpen: new Float32Array(C),      // 政策开放度 0..1（玩家可改）
       tradeWeight: new Float32Array(C),    // λ：市场整合度（每 tick 现算）
+
+      /* ══ 意识形态驱动 v1（2026-09-11）══
+       * 两个**独立于主梯度**的驱动，给"阶级冲突"与"永久后果"提供落点。
+       * 加它们之前先用 test/ideo-dof.js 验过动机（见该文件与 README 的协作约定 5）。 */
+
+      /* 工资政策 0..1（玩家可改，CMD_WAGE）。
+       * 语义：**谁吃到工业化的收益**。
+       *   0 = 市场自行分配：工业化让中上层拿走更多（原公式的 indShare 漂移）
+       *   1 = 国家干预到底：把 6% 的收入份额从上层划给底层
+       * 这是一个**真实的政治取舍**而不是双赢旋钮 —— 每一档都有人受益有人受损，
+       * 这正是原先那条 `WAGE_BASE[x] ± k*indShare` 自动漂移所缺少的。 */
+      wagePolicy: new Float32Array(C),
+
+      /* 教育投入 0..1（玩家可改，CMD_EDU）。驱动识字率向目标收敛 ——
+       * 识字率因此**不是**财富或城市化的函数，而是"这个国家愿不愿意办教育"的函数。
+       * 独立性的来源就在这里：政策是外生的，城市化是内生的。 */
+      eduPolicy: new Float32Array(C),
+
+      /* 识字率 0..1.3（新状态变量，慢变量）。
+       * 只由 eduPolicy + 城市化弱基底驱动，有自己的一代人的记忆。
+       * 与 world 里其它量的关系由 test/ideo-dof.js 逐年把关。 */
+      literacy: new Float32Array(P),
+      /* 可以让识字率的生产加成为 0（litProd: 0）而保留识字率本身 ——
+       * 标定台靠它把"识字率作为驱动"与"识字率影响经济"两件事分开量。 */
+      litProd: (opts.litProd !== undefined) ? opts.litProd : LIT_PROD,
+
+      /* ══ 城乡分化（2026-09-11，第二次尝试）══
+       * 底层的同一个收入池之下，两个群体各自累积财富、各自有篮子。
+       * **与上次失败版本的关键区别：这两个通道进入了需求回路**（见 tick 的第 3 步），
+       * 所以分化会真的传导到价格 → 贸易 → 不满，而不是一个无后果的读数。 */
+      lowerRural: new Float32Array(P),     // 乡村底层的财富
+      lowerUrban: new Float32Array(P),     // 城市底层的财富
+      /* 城乡人口比例：由地理城市化禀赋折算（静态）。刻意不让它在任何省接近 0 或 1 ——
+       * 否则那个省的某一群体消失，"城乡矛盾"在那些地方就没有意义了。 */
+      urbanRatio: new Float32Array(P),
+      /* 粮食政策 0..1（玩家可改，CMD_FOOD）。1 = 全力补贴乡村口粮（定向，不普降）。 */
+      foodPolicy: new Float32Array(C),
+      /* tick 内的临时行缓冲：把"两个群体合成一行需求"写清楚，避免在循环里
+       * 直接往 demand/demandP 各写两次（那样容易漏改一处口径）。 */
+      _rowDemand: new Float64Array(G),
+
+      /* 怨愤（疤痕）—— 曾实现，后**撤销**（2026-09-11）。
+       *
+       * 动机是修「不满会干净地衰减回 0、地图上留不下东西」这个被文档点名三次的毛病。
+       * 但实测（诊断口径：把这条"上界"临时关掉后跑 1200 tick）：
+       *
+       *   t=0     均不满 0.2494  p50 0.241  p90 0.322  max 0.364   >0.30: 51 省
+       *   t=60    均不满 0.0950  p50 0.000  p90 0.451  max 0.800   >0.30: 26 省
+       *   t=1200  均不满 0.1038  p50 0.000  p90 0.800  max 0.800   >0.30: 27 省
+       *
+       * p90 在 t=60 之后就钉死在 0.800、约 26 个省**永久**停在革命上限 ——
+       * **现有模型早就有永久后果了**，"不满会自愈回 0"那条文档结论在当前代码下不成立。
+       * 所以这层机制是在重新实现一个已经存在的东西，删掉。
+       *
+       * 留档的理由（见 test/resent-test.js）：它是可复跑的判据，不是一段被删的代码。
+       * 将来若有人要重做"永久后果"，先跑那台 —— 若 P1 报"残余不可测"，
+       * 说明空间已被现有地板占满，不必再叠一层。
+       */
       /* 这两个是「世界设定」而不是「世界状态」：默认取模块常量，
        * 但可以在 createWorld 的 opts 里覆盖 —— 标定台靠它扫参数（test/trade-sweep.js）。
        * 运输技术将来也可以随时代/科技推进，所以放在世界里而不是写死在函数里。 */
@@ -531,6 +635,17 @@
         w.level[gi * P + p3] = clamp(lv, 0, MAX_LEVEL);
       }
       w.unrest[p3] = clamp(0.30 - w.urban[p3] * 0.10 + rng() * 0.08, 0.02, 0.6);
+      /* 识字率起点：极低。它不是"随城市化自动就有"的 ——
+       * 起点只给一点点，绝大部分要靠教育投入在几十年里"建"出来。
+       * 初值刻意几乎不读 urban（系数 0.02 而非 0.25），否则开局那一格
+       * 就已经是城市化的影子，后面再怎么长都甩不掉。 */
+      w.literacy[p3] = clamp(0.06 + w.urban[p3] * 0.02 + rng() * 0.02, 0.02, 0.2);
+      /* 城乡人口比例（地理禀赋折算），值域约 0.19~0.6 */
+      w.urbanRatio[p3] = clamp(0.18 + 0.25 * w.urban[p3], 0.15, 0.70);
+      /* 两个群体从同一个起点出发（= 底层原有财富），所以开局需求与从前逐字节相同；
+       * 分化是**跑出来**的：篮子不同 → 各自面对的相对价格不同 → 收支比不同 → 漂移不同。 */
+      w.lowerRural[p3] = w.wealth[0 * P + p3];
+      w.lowerUrban[p3] = w.wealth[0 * P + p3];
     }
 
     /* —— 有限要素的天花板：必须在开局等级填好之后才算 ——
@@ -840,7 +955,7 @@
       var required = 0;
       for (g = 0; g < G2; g++) required += w.level[g * P + p] * BUILDINGS[g].jobs;
       var labor = required > 0 ? clamp(workers / required, 0.25, 1) : 1;
-      var eff = (1 - 0.55 * w.unrest[p]) * labor;
+      var eff = (1 - 0.55 * w.unrest[p]) * labor * (1 + w.litProd * w.literacy[p]);
       for (g = 0; g < G2; g++) {
         // 灾年的谷物产出乘数（量的冲击：砍的是产出，不是价格）。
         // 注意：c 要到第 2 步才被赋值，这里必须自己取国家，否则首 tick 会拿到 undefined → output 全 NaN。
@@ -857,17 +972,47 @@
       for (g = 0; g < G2; g++) w.supply[g * C + c] += w.output[g * P + p];
     }
 
-    /* 3) 需求 */
+    /* 3) 需求
+     *
+     * ⚠ 这是城乡分化**必须**进的那道回路。上一次尝试失败就因为新通道
+     * 只挂在 world 上、没有任何人读它 —— 那种"驱动"是无后果的读数。
+     * 这里让乡村/城市两个群体**就是**底层需求的产出者：
+     * 各自的财富 × 各自的篮子 × 各自的定向价格。
+     * 需求同时写入 w.demand 与 w.demandP，而这两者决定国价与省价 ——
+     * 于是分化会真的传导到价格、贸易与不满上。 */
     w.demand.fill(0);
     w.demandP.fill(0);
     for (p = 0; p < P; p++) {
       c = w.map.provinces[p].country;
       for (s = 0; s < S2; s++) {
-        var n = w.pop[s * P + p] / 1000;
-        var wl = w.wealth[s * P + p];
+        for (g = 0; g < G2; g++) w._rowDemand[g] = 0;
+        if (s === 0) {
+          /* 底层 = 乡村 + 城市两个消费群体。
+           * 用**人均量 × 人口**累加，而不是"各自人口 × 篮子"直接相加 ——
+           * 这样当两个群体财富相同时，结果与原来的单篮子**逐字节相同**
+           * （人均量 = 篮子占比 × 乘子，两群体平均后恰是 NEEDS[0] 那一行）。 */
+          var lowPop = w.pop[0 * P + p];
+          var nR = lowPop * (1 - w.urbanRatio[p]) / 1000;
+          var nU = lowPop * w.urbanRatio[p] / 1000;
+          var wlR = w.lowerRural[p], wlU = w.lowerUrban[p];
+          var gDis = 1 - FOOD_SUBSIDY * w.foodPolicy[c];
+          for (g = 0; g < G2; g++) {
+            var pcR = BASKET_RURAL[g] * Math.max(NEED_FLOOR[g], 1 + (wlR - 1) * LUX_SENS[g]) *
+              ((g === 0) ? gDis : 1);      // 粮食政策只作用于乡村口粮
+            var pcU = BASKET_URBAN[g] * Math.max(NEED_FLOOR[g], 1 + (wlU - 1) * LUX_SENS[g]);
+            var pc = (nR + nU) > 0 ? ((1 - w.urbanRatio[p]) * pcR + w.urbanRatio[p] * pcU) : pcR;
+            w._rowDemand[g] = (lowPop / 1000) * pc;
+          }
+        } else {
+          var n = w.pop[s * P + p] / 1000;
+          var wl = w.wealth[s * P + p];
+          for (g = 0; g < G2; g++) {
+            var mult = Math.max(NEED_FLOOR[g], 1 + (wl - 1) * LUX_SENS[g]);
+            w._rowDemand[g] = n * NEEDS[s][g] * mult;
+          }
+        }
         for (g = 0; g < G2; g++) {
-          var mult = Math.max(NEED_FLOOR[g], 1 + (wl - 1) * LUX_SENS[g]);
-          var qty = n * NEEDS[s][g] * mult;
+          var qty = w._rowDemand[g];
           w.demand[g * C + c] += qty;
           /* 同一个量同时记到省上 —— 省级封闭价要用它。
            * 一份数据两处累加，而不是事后拆，是为了不引入第二套口径。 */
@@ -1022,11 +1167,20 @@
         if (g === 3 || g === 4) indLv += w.level[g * P + p];
       }
       var indShare = totalLv > 0 ? indLv / totalLv : 0;
+      /* 工资政策：谁吃到工业化的收益。
+       * wagePolicy=0 就是原来的自动漂移（工业化把份额从中层之外的上下两端重新分配）；
+       * wagePolicy=1 时国家把上层的份额划给底层 —— 于是工业化的果实归谁成了玩家的选择。
+       * 注意这是**零和**的（三档之和恒为 1.0），才构成真实取舍；
+       * 用乘法而非加法，保证份额永不为负。 */
+      var wp0 = w.wagePolicy[c];
+      var laborGain = WAGE_LABOR_SHIFT * wp0;      // 顶层划给底层的份额
       var sh = [
-        WAGE_BASE[0] - 0.06 * indShare,
+        (WAGE_BASE[0] - 0.06 * indShare) * (1 + laborGain),
         WAGE_BASE[1] + 0.04 * indShare,
-        WAGE_BASE[2] + 0.02 * indShare
+        (WAGE_BASE[2] + 0.02 * indShare) * (1 - laborGain)
       ];
+      var shSum = sh[0] + sh[1] + sh[2];           // 守恒归一（乘法会轻微改变总和）
+      if (shSum > 0) { sh[0] /= shSum; sh[1] /= shSum; sh[2] /= shSum; }
 
       for (s = 0; s < S2; s++) {
         var idx = s * P + p;
@@ -1052,6 +1206,49 @@
         w.pop[idx] = Math.max(250, w.pop[idx] * (1 + growth));
       }
 
+      /* 6) 城乡分化 —— 两个群体各自按**人均**收支比漂移财富
+       * ── 为什么必须人均口径 ──
+       * 第一次尝试用「整份 sh[0] 收入 ÷ 该群体支出总额」，等于每个群体都拿整份收入、
+       * 却只付自己那部分人口的开销 —— 双重计入，底层总消费偏差 +73%，开局标定被破坏。
+       * 人均口径还自带一条好性质：两群体财富相同时收支比相同 ⇒ 漂移相同 ⇒ 保持相同，
+       * 所以分化**只能**来自篮子差 × 相对价格，不会自己长出来。
+       *
+       * ── 出什么事会让这台失效 ──
+       * 这两个通道必须被需求回路读到（见 tick 第 3 步）。若有人把它们从需求里摘掉，
+       * test/rural-test.js 的 P5「回路闭合」会红 —— 那是上一次失败的复发信号。 */
+      var rP = w.urbanRatio[p];
+      var lowPop = w.pop[0 * P + p];
+      var lowIncome = revenue * sh[0];
+      var incPC = lowPop > 0 ? lowIncome / (lowPop / 1000) : 0;
+      var expR = 0, expU = 0;
+      var wlR0 = w.lowerRural[p], wlU0 = w.lowerUrban[p];
+      var gDisc = 1 - FOOD_SUBSIDY * w.foodPolicy[c];
+      for (g = 0; g < G2; g++) {
+        var lp2 = w.localPrice[g * P + p];
+        expR += BASKET_RURAL[g] * Math.max(NEED_FLOOR[g], 1 + (wlR0 - 1) * LUX_SENS[g]) *
+          ((g === 0) ? gDisc : 1) * lp2;
+        expU += BASKET_URBAN[g] * Math.max(NEED_FLOOR[g], 1 + (wlU0 - 1) * LUX_SENS[g]) * lp2;
+      }
+      expR = Math.max(expR, 0.5); expU = Math.max(expU, 0.5);
+      var ratioR = incPC / expR, ratioU = incPC / expU;
+      w.lowerRural[p] = clamp(wlR0 * (1 + (ratioR - 1) * LOWER_DRIFT), 0.12, 4.0);
+      w.lowerUrban[p] = clamp(wlU0 * (1 + (ratioU - 1) * LOWER_DRIFT), 0.12, 4.0);
+      /* 底层单通道量 = 两群体的**人口加权合成**。
+       * 一切"读底层"的既有逻辑（相对剥夺、赈灾、最低财富、势力统计）都不改口径。 */
+      w.wealth[0 * P + p] = clamp((1 - rP) * w.lowerRural[p] + rP * w.lowerUrban[p], 0.12, 4.0);
+      w.ratio[0 * P + p] = (1 - rP) * ratioR + rP * ratioU;
+
+      /* 7) 识字率 —— 新状态变量，慢变量（一代人的尺度）
+       * 目标 = 教育投入为主 + 城市化的**弱**基底。收敛率 LIT_RATE 很小，
+       * 所以效果以十年计：100 年的一局里跑不到顶，教育是长线投资。
+       * 独立性就来自这里：eduPolicy 是外生的政策，城市化是内生的地理，
+       * 于是识字率既不是城市化的函数、也不是财富的函数。 */
+      var litTarget = LIT_BASE + LIT_EDU_K * w.eduPolicy[c] + LIT_URBAN_W * (w.urban[p] - 0.5);
+      if (litTarget < 0) litTarget = 0;
+      if (litTarget > LIT_MAX) litTarget = LIT_MAX;
+      var lit = w.literacy[p];
+      w.literacy[p] = lit + (litTarget - lit) * LIT_RATE;
+
       /* 6) 不满 —— 用"目标值"模型，而不是累加漂移
        * 累加模型的问题：只要收支比一好转就以固定速率衰减到 0，地图上留不下东西。
        * 改成先算一个目标不满度 floor，再让实际值向它靠拢。
@@ -1069,11 +1266,20 @@
         if (rel < 0.90) floor = Math.max(floor, (0.90 - rel) * 1.6);
       }
       floor = clamp(floor, 0, 0.80);
+
       if (w.unrest[p] < floor) {
         w.unrest[p] = Math.min(floor, w.unrest[p] + 0.012);
       } else {
         w.unrest[p] = Math.max(floor, w.unrest[p] - 0.020);
       }
+      /* 上界。**这条是补的**（2026-09-11）：原先只有 floor 被夹到 0.80，
+       * 而 unrest 本身没有任何上界 —— 上面的 else 分支每 tick 只减 0.020，
+       * 所以任何把 unrest 推高的来源（存档、脚本、将来的政策冲击）都会留下
+       * 一个长期超额的值。实测：人为置 2.0 后跑 6 tick 仍是 1.88。
+       * 危险在于生产折扣 eff = (1 - 0.55 × unrest) 在 unrest > 1.82 时**变负**，
+       * 也就是"产出为负"。自然演化跑 1800 tick 的历史最大值恰好是 0.8000，
+       * 所以这个洞目前没有被触发，但它是真的。 */
+      if (w.unrest[p] > UNREST_CAP) w.unrest[p] = UNREST_CAP;
 
       /* 7) 投资：盈余省份按"比较优势 × 价格信号"扩产
        * 关键是 geoBonus 参与打分 —— 否则所有省份都会追同一个高价商品，
@@ -1327,6 +1533,38 @@
           if (ov > 1) ov = 1;
           w.tradeOpen[tc] = ov;
         }
+      } else if (kind === CMD_WAGE) {
+        /* 工资政策。同样是「一国的制度」，所以走 cmdCountry。
+         * 与通商政策同形：0..1 连续，UI 给三档即可（市场 / 折中 / 倾斜）。 */
+        var wc = w.cmdCountry[i];
+        if (wc >= 0 && wc < w.C) {
+          var wv = w.cmdValue[i];
+          if (wv < 0) wv = 0;
+          if (wv > 1) wv = 1;
+          w.wagePolicy[wc] = wv;
+        }
+      } else if (kind === CMD_EDU) {
+        /* 教育投入。同样是一国的制度，走 cmdCountry。
+         * 它只改"识字率的目标"，不直接改识字率 —— 于是效果以**十年**为单位显现，
+         * 而不是一键见效。这是刻意的：慢变量才有资格当独立轴。 */
+        var ec = w.cmdCountry[i];
+        if (ec >= 0 && ec < w.C) {
+          var ev2 = w.cmdValue[i];
+          if (ev2 < 0) ev2 = 0;
+          if (ev2 > 1) ev2 = 1;
+          w.eduPolicy[ec] = ev2;
+        }
+      } else if (kind === CMD_FOOD) {
+        /* 粮食政策：一国的制度，走 cmdCountry。
+         * 只对乡村篮子的口粮项打折 —— **定向**补贴，不是普降物价
+         * （普降物价会被财富恒温器吃掉：好玩化设计.md 实验 4）。 */
+        var fc = w.cmdCountry[i];
+        if (fc >= 0 && fc < w.C) {
+          var fv = w.cmdValue[i];
+          if (fv < 0) fv = 0;
+          if (fv > 1) fv = 1;
+          w.foodPolicy[fc] = fv;
+        }
       }
       w.cmdHead = (w.cmdHead + 1) % CMD_CAP;
     }
@@ -1559,6 +1797,19 @@
     CMD_SET_AUTO: CMD_SET_AUTO,
     CMD_TRADE: CMD_TRADE,
     CMD_INFRA: CMD_INFRA,
+    CMD_WAGE: CMD_WAGE,
+    CMD_EDU: CMD_EDU,
+    CMD_FOOD: CMD_FOOD,
+    BASKET_RURAL: BASKET_RURAL,
+    BASKET_URBAN: BASKET_URBAN,
+    FOOD_SUBSIDY: FOOD_SUBSIDY,
+    LOWER_DRIFT: LOWER_DRIFT,
+    WAGE_LABOR_SHIFT: WAGE_LABOR_SHIFT,
+    LIT_RATE: LIT_RATE,
+    LIT_BASE: LIT_BASE,
+    LIT_EDU_K: LIT_EDU_K,
+    LIT_URBAN_W: LIT_URBAN_W,
+    LIT_PROD: LIT_PROD,
     infraCost: infraCost,
     INFRA_MONTHS: INFRA_MONTHS,
     BUILD_MONTHS: BUILD_MONTHS,

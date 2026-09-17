@@ -26,7 +26,10 @@ require(path.join(ROOT, 'js/sim.js'));
 
 var SIM = VIC.sim, MG = VIC.mapgen;
 
-var SEED = 8888;
+/* 种子可从 argv[3] 覆盖。此前它是写死的 8888，于是 `node test/tension.js 1200 777`
+ * 会**静默地仍跑 8888** —— 看起来像"多跑几个种子"，实际每次都是同一个世界。
+ * 这台是"改完还不好玩"的唯一判据，噪声口径必须先可信。 */
+var SEED = parseInt(process.argv[3], 10) || 8888;
 var TICKS = parseInt(process.argv[2], 10) || 1200;
 var PLAYER = 0;                       // 玩家扮演的国家
 var MAP_OPTS = { width: 1600, height: 1000, provinces: 260, countries: 8 };
